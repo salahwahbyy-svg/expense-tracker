@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1" />
+<title>Expenses</title>
+<link rel="manifest" href="manifest.json" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="theme-color" content="#0f0f14" />
+<link rel="apple-touch-icon" href="icon.png" />
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<div class="app">
+
+  <header class="topbar">
+    <button id="prevMonth" class="nav-btn" aria-label="Previous month">‹</button>
+    <div class="month-label" id="monthLabel">July 2026</div>
+    <button id="nextMonth" class="nav-btn" aria-label="Next month">›</button>
+  </header>
+
+  <button id="syncBadge" class="sync-badge" aria-label="Sync settings">
+    <span class="sync-dot" id="syncDot"></span>
+    <span id="syncBadgeLabel">Syncing…</span>
+  </button>
+
+  <section class="totals">
+    <div class="total-amount" id="monthTotal">$0.00</div>
+    <div class="total-sub">spent this month</div>
+  </section>
+
+  <section class="chart-card" id="chartCard">
+    <div class="chart-title">By category</div>
+    <div class="bars" id="bars"></div>
+  </section>
+
+  <section class="list-section">
+    <div id="expenseList" class="expense-list"></div>
+    <div id="emptyState" class="empty-state">
+      <div class="empty-emoji">🧾</div>
+      <div>No expenses yet this month</div>
+    </div>
+  </section>
+
+  <button id="fab" class="fab" aria-label="Add expense">+</button>
+
+</div>
+
+<div id="sheetOverlay" class="sheet-overlay">
+  <div class="sheet">
+    <div class="sheet-handle"></div>
+    <h2 class="sheet-title">Add expense</h2>
+
+    <div class="field">
+      <label>Amount</label>
+      <div class="amount-input-wrap">
+        <span class="currency">$</span>
+        <input id="amountInput" type="number" inputmode="decimal" placeholder="0.00" step="0.01" min="0" />
+      </div>
+    </div>
+
+    <div class="field">
+      <label>Category</label>
+      <div class="category-grid" id="categoryGrid"></div>
+    </div>
+
+    <div class="field">
+      <label>Note (optional)</label>
+      <input id="noteInput" type="text" placeholder="e.g. Coffee with Sam" maxlength="60" />
+    </div>
+
+    <div class="field">
+      <label>Date</label>
+      <input id="dateInput" type="date" />
+    </div>
+
+    <div class="sheet-actions">
+      <button id="cancelBtn" class="btn btn-secondary">Cancel</button>
+      <button id="saveBtn" class="btn btn-primary">Save</button>
+    </div>
+  </div>
+</div>
+
+<div id="syncOverlay" class="sheet-overlay">
+  <div class="sheet">
+    <div class="sheet-handle"></div>
+    <h2 class="sheet-title">Sync across devices</h2>
+
+    <div class="field">
+      <label>Your code</label>
+      <div class="code-display" id="codeDisplay">------</div>
+      <button id="copyCodeBtn" class="btn btn-secondary" style="margin-top:8px;">Copy code</button>
+    </div>
+
+    <p class="sync-hint">Enter this same code on another device (like your iPhone) to see the same expenses there.</p>
+
+    <div class="field">
+      <label>Link a different code</label>
+      <input id="joinCodeInput" type="text" placeholder="Enter a code" maxlength="16" autocapitalize="characters" autocorrect="off" />
+    </div>
+
+    <div class="sheet-actions">
+      <button id="syncCloseBtn" class="btn btn-secondary">Close</button>
+      <button id="joinCodeBtn" class="btn btn-primary">Use this code</button>
+    </div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
