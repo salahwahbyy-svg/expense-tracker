@@ -1,41 +1,55 @@
-const fs = require("fs");
-const path = require("path");
+const { createClient } = require("@libsql/client");
 
-const DATA_PATH = process.env.DATA_PATH || path.join(__dirname, "data.json");
+// Falls back to a local SQLite file when no Turso credentials are set
+// (e.g. local development), and uses the hosted Turso DB in production.
+const client = createClient({
+  url: process.env.TURSO_DATABASE_URL || "file:local.db",
+  authToken: process.env.TURSO_AUTH_TOKEN,
+});
 
-function loadData() {
-  try {
-    return JSON.parse(fs.readFileSync(DATA_PATH, "utf8"));
-  } catch {
-    return {};
-  }
-}
-
-function saveData(data) {
-  const tmpPath = DATA_PATH + ".tmp";
-  fs.writeFileSync(tmpPath, JSON.stringify(data));
-  fs.renameSync(tmpPath, DATA_PATH);
-}
+const ready = client.execute(`
+  CREATE TABLE IF NOT EXISTS expenses (
+    id TEXT PRIMARY KEY,
+    sync_code TEXT NOT NULL,
+    amount REAL NOT NULL,
+    category TEXT NOT NULL,
+    note TEXT,
+    date TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+  )
+`);
 
 module.exports = {
-  getExpenses(code) {
-    const data = loadData();
-    return (data[code] || []).slice().sort((a, b) => b.createdAt - a.createdAt);
+  async getExpenses(code) {
+    await ready;
+    const result = await client.execute({
+      sql: "SELECT id, amount, category, note, date, created_at as createdAt FROM expenses WHERE sync_code = ? ORDER BY created_at DESC",
+      args: [code],
+    });
+    return result.rows.map((r) => ({
+      id: r.id,
+      amount: r.amount,
+      category: r.category,
+      note: r.note,
+      date: r.date,
+      createdAt: Number(r.createdAt),
+    }));
   },
 
-  addExpense(code, expense) {
-    const data = loadData();
-    if (!data[code]) data[code] = [];
-    data[code].push(expense);
-    saveData(data);
+  async addExpense(code, expense) {
+    await ready;
+    await client.execute({
+      sql: "INSERT INTO expenses (id, sync_code, amount, category, note, date, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      args: [expense.id, code, expense.amount, expense.category, expense.note, expense.date, expense.createdAt],
+    });
   },
 
-  deleteExpense(code, id) {
-    const data = loadData();
-    if (!data[code]) return false;
-    const before = data[code].length;
-    data[code] = data[code].filter((e) => e.id !== id);
-    saveData(data);
-    return data[code].length < before;
+  async deleteExpense(code, id) {
+    await ready;
+    const result = await client.execute({
+      sql: "DELETE FROM expenses WHERE id = ? AND sync_code = ?",
+      args: [id, code],
+    });
+    return result.rowsAffected > 0;
   },
 };

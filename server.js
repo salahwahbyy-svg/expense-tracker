@@ -37,11 +37,15 @@ app.post("/api/codes", (req, res) => {
   res.json({ code: generateCode() });
 });
 
-app.get("/api/expenses", requireCode, (req, res) => {
-  res.json({ expenses: db.getExpenses(req.syncCode) });
+app.get("/api/expenses", requireCode, async (req, res, next) => {
+  try {
+    res.json({ expenses: await db.getExpenses(req.syncCode) });
+  } catch (err) {
+    next(err);
+  }
 });
 
-app.post("/api/expenses", requireCode, (req, res) => {
+app.post("/api/expenses", requireCode, async (req, res, next) => {
   const { amount, category, note, date } = req.body;
 
   if (typeof amount !== "number" || !Number.isFinite(amount) || amount <= 0 || amount > 10_000_000) {
@@ -59,17 +63,24 @@ app.post("/api/expenses", requireCode, (req, res) => {
   const createdAt = Date.now();
   const expense = { id, amount, category, note: safeNote, date, createdAt };
 
-  db.addExpense(req.syncCode, expense);
-
-  res.status(201).json(expense);
+  try {
+    await db.addExpense(req.syncCode, expense);
+    res.status(201).json(expense);
+  } catch (err) {
+    next(err);
+  }
 });
 
-app.delete("/api/expenses/:id", requireCode, (req, res) => {
-  const deleted = db.deleteExpense(req.syncCode, req.params.id);
-  if (!deleted) {
-    return res.status(404).json({ error: "not_found" });
+app.delete("/api/expenses/:id", requireCode, async (req, res, next) => {
+  try {
+    const deleted = await db.deleteExpense(req.syncCode, req.params.id);
+    if (!deleted) {
+      return res.status(404).json({ error: "not_found" });
+    }
+    res.status(204).end();
+  } catch (err) {
+    next(err);
   }
-  res.status(204).end();
 });
 
 app.get("/healthz", (req, res) => res.send("ok"));
