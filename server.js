@@ -83,6 +83,174 @@ app.delete("/api/expenses/:id", requireCode, async (req, res, next) => {
   }
 });
 
+// ---------- Financial statements ----------
+
+const ASSET_CATEGORIES = ["Cash", "Bank Accounts", "Gold", "Silver", "Property", "Stocks"];
+const LIABILITY_CATEGORIES = ["Loans", "Credit Card", "Payables"];
+const INCOME_CATEGORIES = ["Salary", "Business Income", "Investment Income", "Other Income"];
+const CF_SECTIONS = ["operating", "investing", "financing"];
+const MONTH_RE = /^\d{4}-\d{2}$/;
+
+app.get("/api/fin/categories", (req, res) => {
+  res.json({
+    assetCategories: ASSET_CATEGORIES,
+    liabilityCategories: LIABILITY_CATEGORIES,
+    incomeCategories: INCOME_CATEGORIES,
+    cfSections: CF_SECTIONS,
+  });
+});
+
+function num(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function safeName(v) {
+  return typeof v === "string" ? v.slice(0, 100) : "";
+}
+
+// Generic CRUD route factory for the statement tables. Each entity defines
+// how to sanitize an incoming body; months and enum fields are validated.
+function finCrud(name, { get, add, update, remove, sanitize }) {
+  app.get(`/api/fin/${name}`, requireCode, async (req, res, next) => {
+    try {
+      res.json(await get(req.syncCode));
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  app.post(`/api/fin/${name}`, requireCode, async (req, res, next) => {
+    try {
+      const fields = sanitize(req.body || {});
+      if (!fields) return res.status(400).json({ error: "invalid_fields" });
+      res.status(201).json(await add(req.syncCode, fields));
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  app.put(`/api/fin/${name}/:id`, requireCode, async (req, res, next) => {
+    try {
+      const fields = sanitize(req.body || {}, true);
+      if (!fields) return res.status(400).json({ error: "invalid_fields" });
+      const row = await update(req.syncCode, req.params.id, fields);
+      if (!row) return res.status(404).json({ error: "not_found" });
+      res.json(row);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  app.delete(`/api/fin/${name}/:id`, requireCode, async (req, res, next) => {
+    try {
+      const deleted = await remove(req.syncCode, req.params.id);
+      if (!deleted) return res.status(404).json({ error: "not_found" });
+      res.status(204).end();
+    } catch (err) {
+      next(err);
+    }
+  });
+}
+
+// For partial updates only include keys present in the body; for creates
+// fill defaults. Returns null when a provided enum value is invalid.
+function pick(body, partial, spec) {
+  const out = {};
+  for (const [key, rule] of Object.entries(spec)) {
+    if (partial && !(key in body)) continue;
+    const raw = body[key];
+    if (rule === "num") out[key] = num(raw);
+    else if (rule === "name") out[key] = safeName(raw);
+    else if (rule === "month") {
+      if (typeof raw !== "string" || !MONTH_RE.test(raw)) {
+        if (partial) return null;
+        out[key] = new Date().toISOString().slice(0, 7);
+      } else out[key] = raw;
+    } else if (Array.isArray(rule)) {
+      if (typeof raw !== "string" || !rule.includes(raw)) {
+        if (partial) return null;
+        out[key] = rule[0];
+      } else out[key] = raw;
+    }
+  }
+  return out;
+}
+
+finCrud("assets", {
+  get: db.getAssets,
+  add: db.addAsset,
+  update: db.updateAsset,
+  remove: db.deleteAsset,
+  sanitize: (b, partial) =>
+    pick(b, partial, { category: ASSET_CATEGORIES, name: "name", value: "num", grams: "num", price_per_gram: "num" }),
+});
+
+finCrud("liabilities", {
+  get: db.getLiabilities,
+  add: db.addLiability,
+  update: db.updateLiability,
+  remove: db.deleteLiability,
+  sanitize: (b, partial) => pick(b, partial, { category: LIABILITY_CATEGORIES, name: "name", value: "num" }),
+});
+
+finCrud("income", {
+  get: db.getPnlIncome,
+  add: db.addPnlIncome,
+  update: db.updatePnlIncome,
+  remove: db.deletePnlIncome,
+  sanitize: (b, partial) => pick(b, partial, { category: INCOME_CATEGORIES, name: "name", value: "num", month: "month" }),
+});
+
+finCrud("cashflow", {
+  get: db.getCfItems,
+  add: db.addCfItem,
+  update: db.updateCfItem,
+  remove: db.deleteCfItem,
+  sanitize: (b, partial) => pick(b, partial, { section: CF_SECTIONS, name: "name", value: "num", month: "month" }),
+});
+
+app.get("/api/fin/networth", requireCode, async (req, res, next) => {
+  try {
+    res.json(await db.getNetWorthHistory(req.syncCode));
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.post("/api/fin/networth/snapshot", requireCode, async (req, res, next) => {
+  const { month, value } = req.body || {};
+  if (typeof month !== "string" || !MONTH_RE.test(month)) {
+    return res.status(400).json({ error: "invalid_month" });
+  }
+  try {
+    res.json(await db.snapshotNetWorth(req.syncCode, month, num(value)));
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get("/api/fin/settings", requireCode, async (req, res, next) => {
+  try {
+    res.json(await db.getSettings(req.syncCode));
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.put("/api/fin/settings", requireCode, async (req, res, next) => {
+  const allowed = ["exchangeRate", "startingCash", "unanimValuation", "unanimOwnership"];
+  const partial = {};
+  for (const key of allowed) {
+    if (key in (req.body || {})) partial[key] = num(req.body[key]);
+  }
+  try {
+    res.json(await db.saveSettings(req.syncCode, partial));
+  } catch (err) {
+    next(err);
+  }
+});
+
 app.get("/healthz", (req, res) => res.send("ok"));
 
 app.get("*", (req, res) => {
