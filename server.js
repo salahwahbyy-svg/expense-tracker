@@ -71,6 +71,30 @@ app.post("/api/expenses", requireCode, async (req, res, next) => {
   }
 });
 
+app.put("/api/expenses/:id", requireCode, async (req, res, next) => {
+  const { amount, category, note, date } = req.body;
+
+  if (typeof amount !== "number" || !Number.isFinite(amount) || amount <= 0 || amount > 10_000_000) {
+    return res.status(400).json({ error: "invalid_amount" });
+  }
+  if (typeof category !== "string" || !ALLOWED_CATEGORIES.has(category)) {
+    return res.status(400).json({ error: "invalid_category" });
+  }
+  if (typeof date !== "string" || !DATE_RE.test(date)) {
+    return res.status(400).json({ error: "invalid_date" });
+  }
+  const safeNote = typeof note === "string" ? note.slice(0, 200) : "";
+  const expense = { amount, category, note: safeNote, date };
+
+  try {
+    const updated = await db.updateExpense(req.syncCode, req.params.id, expense);
+    if (!updated) return res.status(404).json({ error: "not_found" });
+    res.json({ id: req.params.id, ...expense });
+  } catch (err) {
+    next(err);
+  }
+});
+
 app.delete("/api/expenses/:id", requireCode, async (req, res, next) => {
   try {
     const deleted = await db.deleteExpense(req.syncCode, req.params.id);
@@ -239,10 +263,15 @@ app.get("/api/fin/settings", requireCode, async (req, res, next) => {
 });
 
 app.put("/api/fin/settings", requireCode, async (req, res, next) => {
-  const allowed = ["exchangeRate", "startingCash", "unanimValuation", "unanimOwnership"];
+  const allowedNums = ["exchangeRate", "startingCash", "unanimValuation", "unanimOwnership", "taxRate"];
   const partial = {};
-  for (const key of allowed) {
+  for (const key of allowedNums) {
     if (key in (req.body || {})) partial[key] = num(req.body[key]);
+  }
+  if (Array.isArray((req.body || {}).cogsCategories)) {
+    partial.cogsCategories = req.body.cogsCategories.filter(
+      (c) => typeof c === "string" && ALLOWED_CATEGORIES.has(c)
+    );
   }
   try {
     res.json(await db.saveSettings(req.syncCode, partial));

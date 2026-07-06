@@ -53,6 +53,16 @@
     return res.json();
   }
 
+  async function apiUpdateExpense(code, id, payload) {
+    const res = await fetch(`/api/expenses/${encodeURIComponent(id)}?code=${encodeURIComponent(code)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) throw new Error("update_failed");
+    return res.json();
+  }
+
   async function apiDeleteExpense(code, id) {
     const res = await fetch(`/api/expenses/${encodeURIComponent(id)}?code=${encodeURIComponent(code)}`, {
       method: "DELETE",
@@ -92,10 +102,13 @@
   let selectedCategory = null;
   let activeTab = "expenses";
 
+  const METALS = new Set(["Gold", "Silver"]);
+  const isMetal = (cat) => METALS.has(cat);
+
   const fin = {
     loaded: false,
     failed: false,
-    settings: { exchangeRate: 47.5, startingCash: 0, unanimValuation: 0, unanimOwnership: 0 },
+    settings: { exchangeRate: 47.5, startingCash: 0, unanimValuation: 0, unanimOwnership: 0, taxRate: 0, cogsCategories: [] },
     cats: { assetCategories: [], liabilityCategories: [], incomeCategories: [], cfSections: [] },
     assets: [],
     liabilities: [],
@@ -167,19 +180,33 @@
     });
   }
 
-  function renderCategoryGrid() {
-    categoryGrid.innerHTML = "";
-    CATEGORIES.forEach((cat) => {
+  // Shared chip-grid renderer used by the expense sheet, the financial add
+  // sheet, and the P&L COGS toggles. Options are either category objects
+  // ({id,label,emoji}) or plain strings.
+  function renderChipGrid(container, options, isSelected, onSelect) {
+    container.innerHTML = "";
+    options.forEach((opt) => {
+      const label = typeof opt === "string" ? opt : opt.label;
+      const emoji = typeof opt === "string" ? "" : opt.emoji;
       const chip = document.createElement("button");
       chip.type = "button";
-      chip.className = "category-chip" + (selectedCategory === cat.id ? " selected" : "");
-      chip.innerHTML = `<span class="chip-emoji">${cat.emoji}</span><span>${cat.label}</span>`;
-      chip.addEventListener("click", () => {
+      chip.className = "category-chip" + (isSelected(opt) ? " selected" : "");
+      chip.innerHTML = (emoji ? `<span class="chip-emoji">${emoji}</span>` : "") + `<span>${escapeHtml(label)}</span>`;
+      chip.addEventListener("click", () => onSelect(opt));
+      container.appendChild(chip);
+    });
+  }
+
+  function renderCategoryGrid() {
+    renderChipGrid(
+      categoryGrid,
+      CATEGORIES,
+      (cat) => selectedCategory === cat.id,
+      (cat) => {
         selectedCategory = cat.id;
         renderCategoryGrid();
-      });
-      categoryGrid.appendChild(chip);
-    });
+      }
+    );
   }
 
   function renderMonthLabel() {
@@ -257,9 +284,10 @@
       const group = document.createElement("div");
       group.className = "day-group";
 
+      const dayTotal = items.reduce((sum, e) => sum + (Number(e.amount) || 0), 0);
       const heading = document.createElement("div");
       heading.className = "day-heading";
-      heading.textContent = formatDayHeading(date);
+      heading.innerHTML = `<span>${escapeHtml(formatDayHeading(date))}</span><span class="day-total">${currency(dayTotal)}</span>`;
       group.appendChild(heading);
 
       items.forEach((e) => {
@@ -307,16 +335,14 @@
           else if (dx > 20) item.classList.remove("swiped");
         }, { passive: true });
 
-        // Tap an expense to delete it (with confirmation), no swipe required.
+        // Tap an expense to edit it; delete lives inside the edit sheet
+        // (and the swipe-to-delete shortcut still works).
         content.addEventListener("click", () => {
           if (item.classList.contains("swiped")) {
             item.classList.remove("swiped");
             return;
           }
-          const label = `${currency(e.amount)} · ${cat.label}${e.note ? " · " + e.note : ""}`;
-          if (confirm(`Delete this expense?\n${label}`)) {
-            performDelete();
-          }
+          openSheet(e);
         });
 
         item.querySelector(".delete-btn").addEventListener("click", performDelete);
@@ -365,7 +391,7 @@
 
   async function reloadFin(name) {
     try {
-      const data = await finApi(name === "income" ? "income" : name);
+      const data = await finApi(name);
       if (name === "assets") fin.assets = data;
       else if (name === "liabilities") fin.liabilities = data;
       else if (name === "income") fin.income = data;
@@ -376,7 +402,7 @@
   }
 
   function assetEffectiveValue(a) {
-    if (a.category === "Gold" || a.category === "Silver") {
+    if (isMetal(a.category)) {
       return (Number(a.grams) || 0) * (Number(a.price_per_gram) || 0);
     }
     return Number(a.value) || 0;
@@ -418,9 +444,20 @@
     return (Number(fin.settings.startingCash) || 0) + flows;
   }
 
+  // Re-render the fin view without destroying an input the user is still
+  // typing in: if focus is inside the view, wait for it to leave first.
+  function scheduleFinRender() {
+    const active = document.activeElement;
+    if (active && active.tagName === "INPUT" && finView.contains(active)) {
+      active.addEventListener("blur", () => renderFin(), { once: true });
+    } else {
+      renderFin();
+    }
+  }
+
   async function saveFinSettings(partial) {
     Object.assign(fin.settings, partial);
-    renderFin();
+    scheduleFinRender();
     try {
       fin.settings = await finApi("settings", { method: "PUT", body: JSON.stringify(partial) });
     } catch {
@@ -449,11 +486,7 @@
     const cfg = finSheetConfig;
     let html = "";
     if (cfg.chips) {
-      html += `<div class="field"><label>${escapeHtml(cfg.chips.label)}</label><div class="category-grid" id="finChipGrid">`;
-      html += cfg.chips.options
-        .map((opt) => `<button type="button" class="category-chip ${opt === finSheetChip ? "selected" : ""}" data-chip="${escAttr(opt)}"><span>${escapeHtml(opt)}</span></button>`)
-        .join("");
-      html += `</div></div>`;
+      html += `<div class="field"><label>${escapeHtml(cfg.chips.label)}</label><div class="category-grid" id="finChipGrid"></div></div>`;
     }
     const fields = typeof cfg.fields === "function" ? cfg.fields(finSheetChip) : cfg.fields;
     fields.forEach((f) => {
@@ -467,14 +500,16 @@
     });
     finSheetFields.innerHTML = html;
 
-    const grid = document.getElementById("finChipGrid");
-    if (grid) {
-      grid.querySelectorAll(".category-chip").forEach((chip) => {
-        chip.addEventListener("click", () => {
-          finSheetChip = chip.dataset.chip;
+    if (cfg.chips) {
+      renderChipGrid(
+        document.getElementById("finChipGrid"),
+        cfg.chips.options,
+        (opt) => opt === finSheetChip,
+        (opt) => {
+          finSheetChip = opt;
           renderFinSheetFields();
-        });
-      });
+        }
+      );
     }
   }
 
@@ -530,7 +565,7 @@
           } catch {
             alert("Couldn't save the change — check your connection.");
           }
-          renderFin();
+          scheduleFinRender();
         });
       });
       const delBtn = rowEl.querySelector(".row-del");
@@ -684,12 +719,11 @@
       .map((cat) => {
         const items = fin.assets.filter((a) => a.category === cat);
         if (items.length === 0) return "";
-        const isMetal = cat === "Gold" || cat === "Silver";
         const subtotal = items.reduce((s, a) => s + assetEffectiveValue(a), 0);
         const rows = items
           .map((a) =>
             finRowHtml(a, {
-              fields: isMetal
+              fields: isMetal(cat)
                 ? [
                     { key: "name", cls: "f-name", placeholder: "Name" },
                     { key: "grams", cls: "f-num", num: true, placeholder: "Grams" },
@@ -778,7 +812,7 @@
         title: "Add asset",
         chips: { label: "Category", options: fin.cats.assetCategories },
         fields: (cat) =>
-          cat === "Gold" || cat === "Silver"
+          isMetal(cat)
             ? [
                 { key: "name", label: "Name", placeholder: "e.g. 21k gold" },
                 { key: "grams", label: "Grams", type: "num", placeholder: "0" },
@@ -857,6 +891,18 @@
 
     const netPL = totalIncome - totalExpense;
 
+    // ---- ratios: GP, GP%, EBIT, EBIT%, net after tax ----
+    const cogsSet = new Set(fin.settings.cogsCategories || []);
+    const cogs = CATEGORIES.reduce((s, c) => s + (cogsSet.has(c.id) ? expTotals[c.id] || 0 : 0), 0);
+    const opex = totalExpense - cogs;
+    const grossProfit = totalIncome - cogs;
+    const ebit = grossProfit - opex;
+    const pct = (v) => (totalIncome > 0 ? (v / totalIncome) * 100 : 0);
+    const fmtPct = (v) => pct(v).toLocaleString("en-US", { maximumFractionDigits: 1 }) + "%";
+    const taxRate = Number(fin.settings.taxRate) || 0;
+    const tax = ebit > 0 ? ebit * (taxRate / 100) : 0;
+    const netAfterTax = ebit - tax;
+
     return `
       <div class="toggle-row">
         <button class="btn-toggle ${monthly ? "active" : ""}" id="pnlMonthly">Monthly</button>
@@ -883,6 +929,22 @@
           <span class="value ${signClass(netPL)}">${currency(netPL)}</span>
         </div>
       </div>
+
+      <div class="fin-card">
+        <div class="fin-card-title">Ratios</div>
+        <div class="ratio-row"><span>Cost of Sales (COGS)</span><span class="value">${currency(cogs)}</span></div>
+        <div class="ratio-row"><span>Gross Profit</span><span class="value ${signClass(grossProfit)}">${currency(grossProfit)} · ${fmtPct(grossProfit)}</span></div>
+        <div class="ratio-row"><span>Operating Expenses</span><span class="value">${currency(opex)}</span></div>
+        <div class="ratio-row"><span>EBIT</span><span class="value ${signClass(ebit)}">${currency(ebit)} · ${fmtPct(ebit)}</span></div>
+        <div class="setting-row" style="margin-top:10px;">
+          <label>Tax rate %</label>
+          <input id="taxRateInput" type="number" inputmode="decimal" step="0.1" min="0" max="100" value="${escAttr(taxRate)}" />
+        </div>
+        <div class="ratio-row"><span>Tax (${fmtPct(tax)})</span><span class="value">${currency(tax)}</span></div>
+        <div class="fin-totals"><span>Net Profit After Tax</span><span class="value ${signClass(netAfterTax)}">${currency(netAfterTax)}</span></div>
+        <div class="fin-note" style="margin-top:12px;">Which expense categories count as direct costs (COGS)? Tap to toggle — the rest count as operating expenses.</div>
+        <div class="category-grid" id="cogsGrid"></div>
+      </div>
     `;
   }
 
@@ -890,6 +952,23 @@
     document.getElementById("pnlMonthly").addEventListener("click", () => { fin.pnlView = "monthly"; renderFin(); });
     document.getElementById("pnlYearly").addEventListener("click", () => { fin.pnlView = "yearly"; renderFin(); });
     wireFinRows(document.getElementById("incomeCard"), "income", ["value"], "income");
+
+    document.getElementById("taxRateInput").addEventListener("change", (e) => {
+      const v = Math.min(100, Math.max(0, Number(e.target.value) || 0));
+      saveFinSettings({ taxRate: v });
+    });
+
+    const cogsSet = new Set(fin.settings.cogsCategories || []);
+    renderChipGrid(
+      document.getElementById("cogsGrid"),
+      CATEGORIES,
+      (cat) => cogsSet.has(cat.id),
+      (cat) => {
+        if (cogsSet.has(cat.id)) cogsSet.delete(cat.id);
+        else cogsSet.add(cat.id);
+        saveFinSettings({ cogsCategories: [...cogsSet] });
+      }
+    );
 
     document.getElementById("addIncomeBtn").addEventListener("click", () => {
       openFinSheet({
@@ -1003,9 +1082,18 @@
   function renderFin() {
     if (activeTab === "expenses") return;
     if (!fin.loaded) {
-      finView.innerHTML = fin.failed
-        ? '<div class="fin-card"><div class="fin-note">Couldn\'t load your financial data — check your connection and try again.</div></div>'
-        : '<div class="fin-card"><div class="fin-note">Loading…</div></div>';
+      if (fin.failed) {
+        finView.innerHTML =
+          '<div class="fin-card"><div class="fin-note">Couldn\'t load your financial data — check your connection.</div><button class="fin-add-btn" id="finRetryBtn">Retry</button></div>';
+        document.getElementById("finRetryBtn").addEventListener("click", async () => {
+          fin.failed = false;
+          renderFin();
+          await loadFin();
+          renderFin();
+        });
+      } else {
+        finView.innerHTML = '<div class="fin-card"><div class="fin-note">Loading…</div></div>';
+      }
       return;
     }
     if (activeTab === "overview") {
@@ -1032,7 +1120,8 @@
       document.querySelectorAll(".tabbar .tab").forEach((t) => t.classList.toggle("active", t === tab));
       expView.classList.toggle("active", activeTab === "expenses");
       finView.classList.toggle("active", activeTab !== "expenses");
-      if (activeTab !== "expenses" && !fin.loaded && !fin.failed) {
+      if (activeTab !== "expenses" && !fin.loaded) {
+        fin.failed = false;
         renderFin();
         await loadFin();
       }
@@ -1065,21 +1154,49 @@
     return local.toISOString().slice(0, 10);
   }
 
-  function openSheet() {
-    selectedCategory = null;
-    amountInput.value = "";
-    noteInput.value = "";
-    dateInput.value = todayStr();
+  let editingExpenseId = null;
+  const sheetTitle = document.getElementById("sheetTitle");
+  const deleteExpenseBtn = document.getElementById("deleteExpenseBtn");
+
+  function openSheet(expense) {
+    editingExpenseId = expense ? expense.id : null;
+    selectedCategory = expense ? expense.category : null;
+    amountInput.value = expense ? expense.amount : "";
+    noteInput.value = expense ? expense.note || "" : "";
+    dateInput.value = expense ? expense.date : todayStr();
+    sheetTitle.textContent = expense ? "Edit expense" : "Add expense";
+    deleteExpenseBtn.style.display = expense ? "block" : "none";
     renderCategoryGrid();
     sheetOverlay.classList.add("open");
-    setTimeout(() => amountInput.focus(), 200);
+    if (!expense) setTimeout(() => amountInput.focus(), 200);
   }
 
   function closeSheet() {
     sheetOverlay.classList.remove("open");
   }
 
-  document.getElementById("fab").addEventListener("click", openSheet);
+  deleteExpenseBtn.addEventListener("click", async () => {
+    if (!editingExpenseId) return;
+    const target = expenses.find((x) => x.id === editingExpenseId);
+    const label = target ? `${currency(target.amount)}${target.note ? " · " + target.note : ""}` : "";
+    if (!confirm(`Delete this expense?\n${label}`)) return;
+    const prev = expenses;
+    expenses = expenses.filter((x) => x.id !== editingExpenseId);
+    writeCache(syncCode, expenses);
+    closeSheet();
+    renderAll();
+    try {
+      await apiDeleteExpense(syncCode, editingExpenseId);
+    } catch {
+      expenses = prev;
+      writeCache(syncCode, expenses);
+      renderAll();
+      setSyncStatus("offline");
+      alert("Couldn't delete — check your connection and try again.");
+    }
+  });
+
+  document.getElementById("fab").addEventListener("click", () => openSheet());
   document.getElementById("cancelBtn").addEventListener("click", closeSheet);
   sheetOverlay.addEventListener("click", (e) => {
     if (e.target === sheetOverlay) closeSheet();
@@ -1099,8 +1216,14 @@
 
     saveBtn.disabled = true;
     try {
-      const created = await apiAddExpense(syncCode, { amount, category: selectedCategory, note, date });
-      expenses.push(created);
+      const payload = { amount, category: selectedCategory, note, date };
+      if (editingExpenseId) {
+        const updated = await apiUpdateExpense(syncCode, editingExpenseId, payload);
+        expenses = expenses.map((x) => (x.id === editingExpenseId ? { ...x, ...updated } : x));
+      } else {
+        const created = await apiAddExpense(syncCode, payload);
+        expenses.push(created);
+      }
       writeCache(syncCode, expenses);
       closeSheet();
       renderAll();
@@ -1157,14 +1280,19 @@
     setSyncStatus("syncing");
     expenses = readCache(syncCode);
     renderAll();
-    try {
-      expenses = await apiFetchExpenses(syncCode);
-      writeCache(syncCode, expenses);
-      setSyncStatus("online");
-    } catch {
-      setSyncStatus("offline");
-    }
-    await loadFin();
+    // Expenses and financial data are independent — fetch them in parallel.
+    await Promise.all([
+      (async () => {
+        try {
+          expenses = await apiFetchExpenses(syncCode);
+          writeCache(syncCode, expenses);
+          setSyncStatus("online");
+        } catch {
+          setSyncStatus("offline");
+        }
+      })(),
+      loadFin(),
+    ]);
     renderAll();
   }
 

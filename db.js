@@ -70,6 +70,13 @@ const ready = client.batch(
     `CREATE INDEX IF NOT EXISTS idx_cf_items_sync_code ON cf_items (sync_code)`,
   ],
   "write"
+).then(() =>
+  // Guarded column additions for databases created before these settings
+  // existed; "duplicate column" failures are expected and ignored.
+  Promise.allSettled([
+    client.execute("ALTER TABLE fin_settings ADD COLUMN tax_rate REAL DEFAULT 0"),
+    client.execute("ALTER TABLE fin_settings ADD COLUMN cogs_categories TEXT DEFAULT '[]'"),
+  ])
 );
 
 function genId() {
@@ -157,6 +164,15 @@ module.exports = {
     });
   },
 
+  async updateExpense(code, id, expense) {
+    await ready;
+    const result = await client.execute({
+      sql: "UPDATE expenses SET amount = ?, category = ?, note = ?, date = ? WHERE id = ? AND sync_code = ?",
+      args: [expense.amount, expense.category, expense.note, expense.date, id, code],
+    });
+    return result.rowsAffected > 0;
+  },
+
   async deleteExpense(code, id) {
     await ready;
     const result = await client.execute({
@@ -212,15 +228,23 @@ module.exports = {
   async getSettings(code) {
     await ready;
     const result = await client.execute({
-      sql: "SELECT exchange_rate, starting_cash, unanim_valuation, unanim_ownership FROM fin_settings WHERE sync_code = ?",
+      sql: "SELECT exchange_rate, starting_cash, unanim_valuation, unanim_ownership, tax_rate, cogs_categories FROM fin_settings WHERE sync_code = ?",
       args: [code],
     });
     const row = result.rows[0];
+    let cogsCategories = [];
+    try {
+      cogsCategories = row ? JSON.parse(row.cogs_categories) || [] : [];
+    } catch {
+      /* corrupted value -> default */
+    }
     return {
       exchangeRate: row ? row.exchange_rate : 47.5,
       startingCash: row ? row.starting_cash : 0,
       unanimValuation: row ? row.unanim_valuation : 0,
       unanimOwnership: row ? row.unanim_ownership : 0,
+      taxRate: row ? row.tax_rate : 0,
+      cogsCategories,
     };
   },
   async saveSettings(code, partial) {
@@ -228,14 +252,24 @@ module.exports = {
     const current = await module.exports.getSettings(code);
     const merged = { ...current, ...partial };
     await client.execute({
-      sql: `INSERT INTO fin_settings (sync_code, exchange_rate, starting_cash, unanim_valuation, unanim_ownership)
-            VALUES (?, ?, ?, ?, ?)
+      sql: `INSERT INTO fin_settings (sync_code, exchange_rate, starting_cash, unanim_valuation, unanim_ownership, tax_rate, cogs_categories)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(sync_code) DO UPDATE SET
               exchange_rate = excluded.exchange_rate,
               starting_cash = excluded.starting_cash,
               unanim_valuation = excluded.unanim_valuation,
-              unanim_ownership = excluded.unanim_ownership`,
-      args: [code, merged.exchangeRate, merged.startingCash, merged.unanimValuation, merged.unanimOwnership],
+              unanim_ownership = excluded.unanim_ownership,
+              tax_rate = excluded.tax_rate,
+              cogs_categories = excluded.cogs_categories`,
+      args: [
+        code,
+        merged.exchangeRate,
+        merged.startingCash,
+        merged.unanimValuation,
+        merged.unanimOwnership,
+        merged.taxRate,
+        JSON.stringify(merged.cogsCategories || []),
+      ],
     });
     return merged;
   },

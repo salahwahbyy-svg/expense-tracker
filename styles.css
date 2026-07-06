@@ -192,10 +192,19 @@ html, body {
 .day-group { margin-bottom: 18px; }
 
 .day-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
   font-size: 13px;
   color: var(--text-dim);
   margin-bottom: 8px;
-  padding-left: 4px;
+  padding: 0 4px;
+}
+
+.day-total {
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
 }
 
 .expense-item {
@@ -451,6 +460,14 @@ html, body {
   color: #fff;
 }
 
+.btn-danger {
+  width: 100%;
+  background: rgba(255, 107, 107, 0.12);
+  color: var(--danger);
+  border: 1px solid var(--danger);
+  margin-top: 4px;
+}
+
 .btn:active { opacity: 0.8; }
 
 /* ---------- Tab bar & views ---------- */
@@ -494,7 +511,6 @@ html, body {
 
 .fab { bottom: calc(76px + var(--safe-bottom)); }
 
-.app:not([data-tab="expenses"]) ~ * .fab,
 .app:not([data-tab="expenses"]) .fab { display: none; }
 
 /* ---------- Financial statements ---------- */
@@ -712,6 +728,26 @@ html, body {
   font-weight: 600;
   padding: 6px 10px;
 }
+
+.ratio-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 14px;
+  color: var(--text-dim);
+  padding: 6px 0;
+}
+
+.ratio-row .value {
+  color: var(--text);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.ratio-row .value.pos { color: var(--entertainment); }
+.ratio-row .value.neg { color: var(--danger); }
+
+#cogsGrid { margin-top: 8px; }
 
 .chip-list {
   display: flex;
