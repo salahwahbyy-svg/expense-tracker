@@ -228,6 +228,9 @@ html, body {
   width: 100%;
   transition: transform 0.15s ease;
   background: var(--surface);
+  /* Paint above the absolutely-positioned delete button until swiped */
+  position: relative;
+  z-index: 1;
 }
 
 .expense-item.swiped .swipe-content {
@@ -276,6 +279,14 @@ html, body {
   background: var(--danger);
   color: #fff;
   border: none;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease;
+}
+
+.expense-item.swiped .delete-btn {
+  opacity: 1;
+  pointer-events: auto;
   font-size: 14px;
   font-weight: 600;
 }
@@ -727,6 +738,103 @@ html, body {
   font-size: 12px;
   font-weight: 600;
   padding: 6px 10px;
+}
+
+/* ---------- Category editor ---------- */
+
+.chart-title {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.chart-edit-btn {
+  background: none;
+  border: none;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: 0;
+  padding: 2px 4px;
+}
+
+.link-btn {
+  background: none;
+  border: none;
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 600;
+  padding: 8px 0 0;
+}
+
+.cat-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+}
+
+.cat-row input {
+  background: transparent;
+  border: none;
+  color: var(--text);
+  font-size: 14px;
+  min-width: 0;
+}
+
+.cat-row input:focus { outline: none; }
+
+.cat-color-dot {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.25);
+  flex-shrink: 0;
+  padding: 0;
+}
+
+.cat-emoji { width: 34px; text-align: center; flex-shrink: 0; }
+.cat-label { flex: 1.4; }
+.cat-budget {
+  flex: 1;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.cat-row .row-del {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-size: 15px;
+  padding: 2px 4px;
+  flex-shrink: 0;
+}
+
+.cat-lock {
+  font-size: 13px;
+  flex-shrink: 0;
+  opacity: 0.6;
+}
+
+.bar-amount {
+  width: auto;
+  min-width: 56px;
+  white-space: nowrap;
+}
+
+.bar-amount.neg { color: var(--danger); }
+
+.bar-budget { color: var(--text-dim); font-size: 11px; }
+
+a.btn-toggle {
+  text-align: center;
+  text-decoration: none;
+  color: var(--accent);
 }
 
 .ratio-row {

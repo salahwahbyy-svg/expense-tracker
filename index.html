@@ -33,7 +33,7 @@
     </section>
 
     <section class="chart-card" id="chartCard">
-      <div class="chart-title">By category</div>
+      <div class="chart-title"><span>By category</span><button id="editCatsChartBtn" class="chart-edit-btn" type="button">✏️ Edit</button></div>
       <div class="bars" id="bars"></div>
     </section>
 
@@ -76,6 +76,7 @@
     <div class="field">
       <label>Category</label>
       <div class="category-grid" id="categoryGrid"></div>
+      <button id="editCatsBtn" type="button" class="link-btn">✏️ Edit categories</button>
     </div>
 
     <div class="field">
@@ -105,6 +106,19 @@
     <div class="sheet-actions">
       <button id="finCancelBtn" class="btn btn-secondary">Cancel</button>
       <button id="finSaveBtn" class="btn btn-primary">Save</button>
+    </div>
+  </div>
+</div>
+
+<div id="catSheetOverlay" class="sheet-overlay">
+  <div class="sheet">
+    <div class="sheet-handle"></div>
+    <h2 class="sheet-title">Edit categories</h2>
+    <p class="sync-hint">Tap the dot to change color. Set a monthly budget to see progress bars on the Spend tab. Deleting a category moves its expenses to Other.</p>
+    <div id="catList"></div>
+    <button id="addCatBtn" class="fin-add-btn" type="button">+ Add category</button>
+    <div class="sheet-actions">
+      <button id="catCloseBtn" class="btn btn-primary">Done</button>
     </div>
   </div>
 </div>

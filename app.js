@@ -1,17 +1,22 @@
 (function () {
   "use strict";
 
-  const CATEGORIES = [
-    { id: "food", label: "Food", emoji: "🍔", color: "var(--food)" },
-    { id: "transport", label: "Transport", emoji: "🚗", color: "var(--transport)" },
-    { id: "bills", label: "Bills", emoji: "🧾", color: "var(--bills)" },
-    { id: "shopping", label: "Shopping", emoji: "🛍️", color: "var(--shopping)" },
-    { id: "entertainment", label: "Fun", emoji: "🎬", color: "var(--entertainment)" },
-    { id: "other", label: "Other", emoji: "📦", color: "var(--other)" },
+  // Categories are user-editable and load per sync code; these defaults
+  // are only the offline/first-paint fallback (they match the server seed).
+  const DEFAULT_CATEGORIES = [
+    { id: "food", label: "Food", emoji: "🍔", color: "#ff8a5b", budget: 0 },
+    { id: "transport", label: "Transport", emoji: "🚗", color: "#5bc0ff", budget: 0 },
+    { id: "bills", label: "Bills", emoji: "🧾", color: "#ffd166", budget: 0 },
+    { id: "shopping", label: "Shopping", emoji: "🛍️", color: "#c792ff", budget: 0 },
+    { id: "entertainment", label: "Fun", emoji: "🎬", color: "#6cf0b8", budget: 0 },
+    { id: "business", label: "Business", emoji: "💼", color: "#6c8bff", budget: 0 },
+    { id: "interest", label: "Interest", emoji: "🏦", color: "#ff9ecb", budget: 0 },
+    { id: "other", label: "Other", emoji: "📦", color: "#9494a3", budget: 0 },
   ];
 
   const CODE_KEY = "expenses:syncCode";
   const CACHE_PREFIX = "expenses:cache:";
+  const CATS_CACHE_PREFIX = "expenses:cats:";
 
   function currency(n) {
     const v = Number(n) || 0;
@@ -97,6 +102,41 @@
 
   let syncCode = localStorage.getItem(CODE_KEY) || "";
   let expenses = syncCode ? readCache(syncCode) : [];
+
+  // ---- expense categories (dynamic) ----
+  function readCatsCache(code) {
+    try {
+      const cached = JSON.parse(localStorage.getItem(CATS_CACHE_PREFIX + code));
+      return Array.isArray(cached) && cached.length > 0 ? cached : null;
+    } catch {
+      return null;
+    }
+  }
+
+  let cats = (syncCode && readCatsCache(syncCode)) || DEFAULT_CATEGORIES;
+
+  function catById(id) {
+    return cats.find((c) => c.id === id) || { id, label: id, emoji: "📦", color: "#9494a3", budget: 0 };
+  }
+
+  async function catsApi(path, opts) {
+    const sep = path.includes("?") ? "&" : "?";
+    const res = await fetch(`/api/categories${path}${sep}code=${encodeURIComponent(syncCode)}`, {
+      headers: { "Content-Type": "application/json" },
+      ...opts,
+    });
+    if (!res.ok) throw new Error("cats_api_failed");
+    return res.json();
+  }
+
+  async function loadCats() {
+    try {
+      cats = await catsApi("");
+      localStorage.setItem(CATS_CACHE_PREFIX + syncCode, JSON.stringify(cats));
+    } catch {
+      cats = readCatsCache(syncCode) || DEFAULT_CATEGORIES;
+    }
+  }
   let viewDate = new Date();
   viewDate.setDate(1);
   let selectedCategory = null;
@@ -200,7 +240,7 @@
   function renderCategoryGrid() {
     renderChipGrid(
       categoryGrid,
-      CATEGORIES,
+      cats,
       (cat) => selectedCategory === cat.id,
       (cat) => {
         selectedCategory = cat.id;
@@ -226,8 +266,14 @@
       grandTotal += e.amount;
     });
 
-    const active = CATEGORIES.filter((c) => totalsByCat[c.id] > 0)
-      .sort((a, b) => totalsByCat[b.id] - totalsByCat[a.id]);
+    // Show every category with spend this month, plus budgeted ones even
+    // at zero spend so budget progress is visible from day one.
+    const ids = new Set(Object.keys(totalsByCat));
+    cats.forEach((c) => {
+      if (Number(c.budget) > 0) ids.add(c.id);
+    });
+    const active = [...ids].map(catById)
+      .sort((a, b) => (totalsByCat[b.id] || 0) - (totalsByCat[a.id] || 0));
 
     if (active.length === 0) {
       chartCard.classList.add("hidden");
@@ -237,15 +283,25 @@
 
     barsEl.innerHTML = "";
     active.forEach((cat) => {
-      const amount = totalsByCat[cat.id];
-      const pct = grandTotal > 0 ? (amount / grandTotal) * 100 : 0;
+      const amount = totalsByCat[cat.id] || 0;
+      const budget = Number(cat.budget) || 0;
+      let pct, amountHtml, over = false;
+      if (budget > 0) {
+        pct = Math.min(100, (amount / budget) * 100);
+        over = amount > budget;
+        amountHtml = `${currency(amount)} <span class="bar-budget">/ ${currency(budget)}</span>`;
+      } else {
+        pct = grandTotal > 0 ? (amount / grandTotal) * 100 : 0;
+        amountHtml = currency(amount);
+      }
+      const fill = over ? "var(--danger)" : cat.color;
       const row = document.createElement("div");
       row.className = "bar-row";
       row.innerHTML = `
         <span class="bar-dot" style="background:${cat.color}"></span>
-        <span class="bar-label">${cat.label}</span>
-        <span class="bar-track"><span class="bar-fill" style="width:${pct}%;background:${cat.color}"></span></span>
-        <span class="bar-amount">${currency(amount)}</span>
+        <span class="bar-label">${escapeHtml(cat.label)}</span>
+        <span class="bar-track"><span class="bar-fill" style="width:${pct}%;background:${fill}"></span></span>
+        <span class="bar-amount ${over ? "neg" : ""}">${amountHtml}</span>
       `;
       barsEl.appendChild(row);
     });
@@ -291,16 +347,16 @@
       group.appendChild(heading);
 
       items.forEach((e) => {
-        const cat = CATEGORIES.find((c) => c.id === e.category) || CATEGORIES[CATEGORIES.length - 1];
+        const cat = catById(e.category);
         const item = document.createElement("div");
         item.className = "expense-item";
         item.dataset.id = e.id;
         item.innerHTML = `
           <button class="delete-btn">Delete</button>
           <div class="swipe-content">
-            <div class="expense-icon" style="background:${cat.color}22;color:${cat.color}">${cat.emoji}</div>
+            <div class="expense-icon" style="background:${escAttr(cat.color)}22;color:${escAttr(cat.color)}">${escapeHtml(cat.emoji)}</div>
             <div class="expense-meta">
-              <div class="expense-category">${cat.label}</div>
+              <div class="expense-category">${escapeHtml(cat.label)}</div>
               ${e.note ? `<div class="expense-note">${escapeHtml(e.note)}</div>` : ""}
             </div>
             <div class="expense-amount">${currency(e.amount)}</div>
@@ -584,6 +640,15 @@
     });
   }
 
+  function exportRowHtml() {
+    const q = `code=${encodeURIComponent(syncCode)}&month=${monthStr(viewDate)}`;
+    return `
+      <div class="toggle-row">
+        <a class="btn-toggle export-link" href="/api/export/xlsx?${q}">⬇ Excel</a>
+        <a class="btn-toggle export-link" href="/api/export/pdf?${q}">⬇ PDF</a>
+      </div>`;
+  }
+
   // ---------- OVERVIEW ----------
   function renderOverview() {
     const nw = computeNetWorth();
@@ -761,6 +826,7 @@
       .join("");
 
     return `
+      ${exportRowHtml()}
       <div class="fin-card" id="assetsCard">
         <div class="fin-card-title">Assets</div>
         ${assetSections || '<div class="fin-note">No assets yet.</div>'}
@@ -877,33 +943,39 @@
     // Expense side auto-computed from the expense log
     const expTotals = expenseTotalsByCategory((e) => inRange(e.date.slice(0, 7)));
     const totalExpense = Object.values(expTotals).reduce((s, v) => s + v, 0);
-    const expenseRows = CATEGORIES.filter((c) => expTotals[c.id] > 0)
-      .sort((a, b) => expTotals[b.id] - expTotals[a.id])
-      .map(
-        (c) => `
+    const expenseRows = Object.entries(expTotals)
+      .sort((a, b) => b[1] - a[1])
+      .map(([id, v]) => {
+        const c = catById(id);
+        return `
         <div class="fin-row readonly">
-          <span style="font-size:16px;">${c.emoji}</span>
-          <span class="f-name" style="flex:1.4;font-size:14px;">${c.label}</span>
-          <span class="row-amount">${currency(expTotals[c.id])}</span>
-        </div>`
-      )
+          <span style="font-size:16px;">${escapeHtml(c.emoji)}</span>
+          <span class="f-name" style="flex:1.4;font-size:14px;">${escapeHtml(c.label)}</span>
+          <span class="row-amount">${currency(v)}</span>
+        </div>`;
+      })
       .join("");
 
     const netPL = totalIncome - totalExpense;
 
-    // ---- ratios: GP, GP%, EBIT, EBIT%, net after tax ----
+    // ---- ratios: GP, GP%, EBIT, EBT, net after tax ----
+    // Interest (the 'interest' category) sits below EBIT, unless the user
+    // explicitly marked it as a direct cost.
     const cogsSet = new Set(fin.settings.cogsCategories || []);
-    const cogs = CATEGORIES.reduce((s, c) => s + (cogsSet.has(c.id) ? expTotals[c.id] || 0 : 0), 0);
-    const opex = totalExpense - cogs;
+    const cogs = Object.entries(expTotals).reduce((s, [id, v]) => s + (cogsSet.has(id) ? v : 0), 0);
+    const interest = cogsSet.has("interest") ? 0 : expTotals.interest || 0;
+    const opex = totalExpense - cogs - interest;
     const grossProfit = totalIncome - cogs;
     const ebit = grossProfit - opex;
+    const ebt = ebit - interest;
     const pct = (v) => (totalIncome > 0 ? (v / totalIncome) * 100 : 0);
     const fmtPct = (v) => pct(v).toLocaleString("en-US", { maximumFractionDigits: 1 }) + "%";
     const taxRate = Number(fin.settings.taxRate) || 0;
-    const tax = ebit > 0 ? ebit * (taxRate / 100) : 0;
-    const netAfterTax = ebit - tax;
+    const tax = ebt > 0 ? ebt * (taxRate / 100) : 0;
+    const netAfterTax = ebt - tax;
 
     return `
+      ${exportRowHtml()}
       <div class="toggle-row">
         <button class="btn-toggle ${monthly ? "active" : ""}" id="pnlMonthly">Monthly</button>
         <button class="btn-toggle ${!monthly ? "active" : ""}" id="pnlYearly">Yearly</button>
@@ -936,11 +1008,13 @@
         <div class="ratio-row"><span>Gross Profit</span><span class="value ${signClass(grossProfit)}">${currency(grossProfit)} · ${fmtPct(grossProfit)}</span></div>
         <div class="ratio-row"><span>Operating Expenses</span><span class="value">${currency(opex)}</span></div>
         <div class="ratio-row"><span>EBIT</span><span class="value ${signClass(ebit)}">${currency(ebit)} · ${fmtPct(ebit)}</span></div>
+        <div class="ratio-row"><span>Interest</span><span class="value">${currency(interest)}</span></div>
+        <div class="ratio-row"><span>EBT</span><span class="value ${signClass(ebt)}">${currency(ebt)} · ${fmtPct(ebt)}</span></div>
         <div class="setting-row" style="margin-top:10px;">
           <label>Tax rate %</label>
           <input id="taxRateInput" type="number" inputmode="decimal" step="0.1" min="0" max="100" value="${escAttr(taxRate)}" />
         </div>
-        <div class="ratio-row"><span>Tax (${fmtPct(tax)})</span><span class="value">${currency(tax)}</span></div>
+        <div class="ratio-row"><span>Tax on EBT</span><span class="value">${currency(tax)}</span></div>
         <div class="fin-totals"><span>Net Profit After Tax</span><span class="value ${signClass(netAfterTax)}">${currency(netAfterTax)}</span></div>
         <div class="fin-note" style="margin-top:12px;">Which expense categories count as direct costs (COGS)? Tap to toggle — the rest count as operating expenses.</div>
         <div class="category-grid" id="cogsGrid"></div>
@@ -961,7 +1035,7 @@
     const cogsSet = new Set(fin.settings.cogsCategories || []);
     renderChipGrid(
       document.getElementById("cogsGrid"),
-      CATEGORIES,
+      cats,
       (cat) => cogsSet.has(cat.id),
       (cat) => {
         if (cogsSet.has(cat.id)) cogsSet.delete(cat.id);
@@ -1031,6 +1105,7 @@
     const cash = endingCashBalance(m);
 
     return `
+      ${exportRowHtml()}
       <div class="toggle-row">
         <button class="btn-toggle ${monthly ? "active" : ""}" id="cfMonthly">Monthly</button>
         <button class="btn-toggle ${!monthly ? "active" : ""}" id="cfYearly">Yearly</button>
@@ -1236,6 +1311,106 @@
     }
   });
 
+  // ---- category editor sheet ----
+  const CAT_PALETTE = ["#ff8a5b", "#5bc0ff", "#ffd166", "#c792ff", "#6cf0b8", "#6c8bff", "#ff9ecb", "#ff6b6b", "#9ee37d", "#f4a261", "#9494a3"];
+  const catSheetOverlay = document.getElementById("catSheetOverlay");
+  const catListEl = document.getElementById("catList");
+
+  function openCatSheet() {
+    closeSheet();
+    renderCatRows();
+    catSheetOverlay.classList.add("open");
+  }
+
+  function closeCatSheet() {
+    catSheetOverlay.classList.remove("open");
+    renderAll();
+  }
+
+  function renderCatRows() {
+    catListEl.innerHTML = "";
+    cats.forEach((cat) => {
+      const row = document.createElement("div");
+      row.className = "cat-row";
+      row.innerHTML = `
+        <button class="cat-color-dot" style="background:${escAttr(cat.color)}" aria-label="Change color"></button>
+        <input class="cat-emoji" value="${escAttr(cat.emoji)}" maxlength="4" aria-label="Emoji" />
+        <input class="cat-label" value="${escAttr(cat.label)}" maxlength="24" aria-label="Name" />
+        <input class="cat-budget" type="number" inputmode="decimal" min="0" placeholder="Budget" value="${Number(cat.budget) > 0 ? escAttr(cat.budget) : ""}" aria-label="Monthly budget" />
+        ${cat.id === "other" ? '<span class="cat-lock" title="Permanent">🔒</span>' : '<button class="row-del">✕</button>'}
+      `;
+
+      async function saveCat(fields) {
+        try {
+          await catsApi(`/${encodeURIComponent(cat.id)}`, { method: "PUT", body: JSON.stringify(fields) });
+          await loadCats();
+        } catch {
+          alert("Couldn't save — check your connection.");
+        }
+        renderCatRows();
+      }
+
+      row.querySelector(".cat-color-dot").addEventListener("click", () => {
+        const idx = CAT_PALETTE.indexOf(cat.color);
+        saveCat({ color: CAT_PALETTE[(idx + 1) % CAT_PALETTE.length] });
+      });
+      row.querySelector(".cat-emoji").addEventListener("change", (e) => saveCat({ emoji: e.target.value }));
+      row.querySelector(".cat-label").addEventListener("change", (e) => {
+        if (e.target.value.trim()) saveCat({ label: e.target.value.trim() });
+        else renderCatRows();
+      });
+      row.querySelector(".cat-budget").addEventListener("change", (e) => {
+        saveCat({ budget: Math.max(0, Number(e.target.value) || 0) });
+      });
+
+      const del = row.querySelector(".row-del");
+      if (del) {
+        del.addEventListener("click", async () => {
+          if (!confirm(`Delete "${cat.label}"?\nAny expenses in it will move to Other.`)) return;
+          try {
+            await catsApi(`/${encodeURIComponent(cat.id)}`, { method: "DELETE" });
+            await Promise.all([
+              loadCats(),
+              (async () => {
+                try {
+                  expenses = await apiFetchExpenses(syncCode);
+                  writeCache(syncCode, expenses);
+                } catch {
+                  /* keep cached list */
+                }
+              })(),
+            ]);
+          } catch {
+            alert("Couldn't delete — check your connection.");
+          }
+          renderCatRows();
+        });
+      }
+
+      catListEl.appendChild(row);
+    });
+  }
+
+  document.getElementById("addCatBtn").addEventListener("click", async () => {
+    try {
+      await catsApi("", {
+        method: "POST",
+        body: JSON.stringify({ label: "New category", emoji: "🏷️", color: CAT_PALETTE[cats.length % CAT_PALETTE.length], budget: 0 }),
+      });
+      await loadCats();
+    } catch {
+      alert("Couldn't add — check your connection.");
+    }
+    renderCatRows();
+  });
+
+  document.getElementById("catCloseBtn").addEventListener("click", closeCatSheet);
+  catSheetOverlay.addEventListener("click", (e) => {
+    if (e.target === catSheetOverlay) closeCatSheet();
+  });
+  document.getElementById("editCatsBtn").addEventListener("click", openCatSheet);
+  document.getElementById("editCatsChartBtn").addEventListener("click", openCatSheet);
+
   // ---- sync sheet ----
   function openSyncSheet() {
     codeDisplay.textContent = syncCode || "------";
@@ -1273,6 +1448,7 @@
     closeSyncSheet();
     fin.loaded = false;
     fin.failed = false;
+    cats = readCatsCache(syncCode) || DEFAULT_CATEGORIES;
     await loadFromServer();
   });
 
@@ -1280,7 +1456,7 @@
     setSyncStatus("syncing");
     expenses = readCache(syncCode);
     renderAll();
-    // Expenses and financial data are independent — fetch them in parallel.
+    // Expenses, categories and financial data are independent — parallel.
     await Promise.all([
       (async () => {
         try {
@@ -1291,6 +1467,7 @@
           setSyncStatus("offline");
         }
       })(),
+      loadCats(),
       loadFin(),
     ]);
     renderAll();

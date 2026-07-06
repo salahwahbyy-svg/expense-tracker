@@ -56,6 +56,16 @@ const ready = client.batch(
       value REAL DEFAULT 0,
       PRIMARY KEY (sync_code, month)
     )`,
+    `CREATE TABLE IF NOT EXISTS categories (
+      sync_code TEXT NOT NULL,
+      id TEXT NOT NULL,
+      label TEXT NOT NULL,
+      emoji TEXT DEFAULT '',
+      color TEXT DEFAULT '#9494a3',
+      budget REAL DEFAULT 0,
+      sort INTEGER DEFAULT 0,
+      PRIMARY KEY (sync_code, id)
+    )`,
     `CREATE TABLE IF NOT EXISTS fin_settings (
       sync_code TEXT PRIMARY KEY,
       exchange_rate REAL DEFAULT 47.5,
@@ -82,6 +92,19 @@ const ready = client.batch(
 function genId() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 9);
 }
+
+// Seeded for every new sync code; 'other' is permanent and is the
+// reassignment target when a category with expenses is deleted.
+const DEFAULT_CATEGORIES = [
+  { id: "food", label: "Food", emoji: "🍔", color: "#ff8a5b" },
+  { id: "transport", label: "Transport", emoji: "🚗", color: "#5bc0ff" },
+  { id: "bills", label: "Bills", emoji: "🧾", color: "#ffd166" },
+  { id: "shopping", label: "Shopping", emoji: "🛍️", color: "#c792ff" },
+  { id: "entertainment", label: "Fun", emoji: "🎬", color: "#6cf0b8" },
+  { id: "business", label: "Business", emoji: "💼", color: "#6c8bff" },
+  { id: "interest", label: "Interest", emoji: "🏦", color: "#ff9ecb" },
+  { id: "other", label: "Other", emoji: "📦", color: "#9494a3" },
+];
 
 // ---------- generic row helpers ----------
 async function getRows(table, code) {
@@ -205,6 +228,76 @@ module.exports = {
   addCfItem: (code, f) => insertRow("cf_items", code, { section: f.section, name: f.name || "", value: f.value || 0, month: f.month }),
   updateCfItem: (code, id, f) => updateRow("cf_items", code, id, ["section", "name", "value", "month"], f),
   deleteCfItem: (code, id) => deleteRow("cf_items", code, id),
+
+  // ---------- expense categories ----------
+  async getCategories(code) {
+    await ready;
+    let result = await client.execute({
+      sql: "SELECT id, label, emoji, color, budget FROM categories WHERE sync_code = ? ORDER BY sort ASC, rowid ASC",
+      args: [code],
+    });
+    if (result.rows.length === 0) {
+      await client.batch(
+        DEFAULT_CATEGORIES.map((c, i) => ({
+          sql: "INSERT OR IGNORE INTO categories (sync_code, id, label, emoji, color, budget, sort) VALUES (?, ?, ?, ?, ?, 0, ?)",
+          args: [code, c.id, c.label, c.emoji, c.color, i],
+        })),
+        "write"
+      );
+      result = await client.execute({
+        sql: "SELECT id, label, emoji, color, budget FROM categories WHERE sync_code = ? ORDER BY sort ASC, rowid ASC",
+        args: [code],
+      });
+    }
+    return result.rows;
+  },
+
+  async addCategory(code, cat) {
+    await ready;
+    await client.execute({
+      sql: "INSERT INTO categories (sync_code, id, label, emoji, color, budget, sort) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      args: [code, cat.id, cat.label, cat.emoji, cat.color, cat.budget || 0, Date.now()],
+    });
+    return cat;
+  },
+
+  async updateCategory(code, id, fields) {
+    await ready;
+    const allowed = ["label", "emoji", "color", "budget"];
+    const sets = Object.keys(fields).filter((k) => allowed.includes(k));
+    if (sets.length === 0) return true;
+    const setClause = sets.map((k) => `${k} = ?`).join(",");
+    const result = await client.execute({
+      sql: `UPDATE categories SET ${setClause} WHERE sync_code = ? AND id = ?`,
+      args: [...sets.map((k) => fields[k]), code, id],
+    });
+    return result.rowsAffected > 0;
+  },
+
+  // Deleting a category moves its expenses to 'other' so no amounts are
+  // lost. Returns how many expenses were moved, or null if not found.
+  async deleteCategory(code, id) {
+    await ready;
+    const moved = await client.execute({
+      sql: "UPDATE expenses SET category = 'other' WHERE sync_code = ? AND category = ?",
+      args: [code, id],
+    });
+    const del = await client.execute({
+      sql: "DELETE FROM categories WHERE sync_code = ? AND id = ?",
+      args: [code, id],
+    });
+    if (del.rowsAffected === 0) return null;
+    return moved.rowsAffected;
+  },
+
+  async countExpensesInCategory(code, id) {
+    await ready;
+    const result = await client.execute({
+      sql: "SELECT COUNT(*) AS n FROM expenses WHERE sync_code = ? AND category = ?",
+      args: [code, id],
+    });
+    return Number(result.rows[0].n);
+  },
 
   // ---------- net worth history ----------
   async getNetWorthHistory(code) {

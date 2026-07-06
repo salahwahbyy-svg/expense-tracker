@@ -9,14 +9,9 @@ const PORT = process.env.PORT || 3000;
 const CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no 0/O/1/I
 const generateCode = customAlphabet(CODE_ALPHABET, 7);
 
-const ALLOWED_CATEGORIES = new Set([
-  "food",
-  "transport",
-  "bills",
-  "shopping",
-  "entertainment",
-  "other",
-]);
+// Categories are user-defined per sync code (stored in the categories
+// table); the server only validates the id shape.
+const CATEGORY_ID_RE = /^[a-z0-9-]{1,24}$/;
 
 const CODE_RE = /^[A-Z0-9]{4,16}$/;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -51,7 +46,7 @@ app.post("/api/expenses", requireCode, async (req, res, next) => {
   if (typeof amount !== "number" || !Number.isFinite(amount) || amount <= 0 || amount > 10_000_000) {
     return res.status(400).json({ error: "invalid_amount" });
   }
-  if (typeof category !== "string" || !ALLOWED_CATEGORIES.has(category)) {
+  if (typeof category !== "string" || !CATEGORY_ID_RE.test(category)) {
     return res.status(400).json({ error: "invalid_category" });
   }
   if (typeof date !== "string" || !DATE_RE.test(date)) {
@@ -77,7 +72,7 @@ app.put("/api/expenses/:id", requireCode, async (req, res, next) => {
   if (typeof amount !== "number" || !Number.isFinite(amount) || amount <= 0 || amount > 10_000_000) {
     return res.status(400).json({ error: "invalid_amount" });
   }
-  if (typeof category !== "string" || !ALLOWED_CATEGORIES.has(category)) {
+  if (typeof category !== "string" || !CATEGORY_ID_RE.test(category)) {
     return res.status(400).json({ error: "invalid_category" });
   }
   if (typeof date !== "string" || !DATE_RE.test(date)) {
@@ -102,6 +97,77 @@ app.delete("/api/expenses/:id", requireCode, async (req, res, next) => {
       return res.status(404).json({ error: "not_found" });
     }
     res.status(204).end();
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ---------- Expense categories ----------
+
+const COLOR_RE = /^#[0-9a-fA-F]{6}$/;
+
+function sanitizeCategory(body, partial) {
+  const out = {};
+  const b = body || {};
+  if (!partial || "label" in b) {
+    if (typeof b.label !== "string" || !b.label.trim()) return null;
+    out.label = b.label.trim().slice(0, 24);
+  }
+  if (!partial || "emoji" in b) {
+    out.emoji = typeof b.emoji === "string" ? b.emoji.slice(0, 8) : "";
+  }
+  if (!partial || "color" in b) {
+    out.color = typeof b.color === "string" && COLOR_RE.test(b.color) ? b.color : "#9494a3";
+  }
+  if (!partial || "budget" in b) {
+    out.budget = Math.max(0, num(b.budget));
+  }
+  return out;
+}
+
+app.get("/api/categories", requireCode, async (req, res, next) => {
+  try {
+    res.json(await db.getCategories(req.syncCode));
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.post("/api/categories", requireCode, async (req, res, next) => {
+  const fields = sanitizeCategory(req.body, false);
+  if (!fields) return res.status(400).json({ error: "invalid_label" });
+  const base = fields.label.toLowerCase().replace(/[^a-z0-9]+/g, "").slice(0, 16) || "cat";
+  try {
+    const existing = new Set((await db.getCategories(req.syncCode)).map((c) => c.id));
+    let id = base;
+    let n = 2;
+    while (existing.has(id)) id = base + n++;
+    res.status(201).json(await db.addCategory(req.syncCode, { id, ...fields }));
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.put("/api/categories/:id", requireCode, async (req, res, next) => {
+  const fields = sanitizeCategory(req.body, true);
+  if (!fields) return res.status(400).json({ error: "invalid_label" });
+  try {
+    const ok = await db.updateCategory(req.syncCode, req.params.id, fields);
+    if (!ok) return res.status(404).json({ error: "not_found" });
+    res.json({ id: req.params.id, ...fields });
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.delete("/api/categories/:id", requireCode, async (req, res, next) => {
+  if (req.params.id === "other") {
+    return res.status(400).json({ error: "cannot_delete_other" });
+  }
+  try {
+    const moved = await db.deleteCategory(req.syncCode, req.params.id);
+    if (moved === null) return res.status(404).json({ error: "not_found" });
+    res.json({ moved });
   } catch (err) {
     next(err);
   }
@@ -270,11 +336,49 @@ app.put("/api/fin/settings", requireCode, async (req, res, next) => {
   }
   if (Array.isArray((req.body || {}).cogsCategories)) {
     partial.cogsCategories = req.body.cogsCategories.filter(
-      (c) => typeof c === "string" && ALLOWED_CATEGORIES.has(c)
+      (c) => typeof c === "string" && CATEGORY_ID_RE.test(c)
     );
   }
   try {
     res.json(await db.saveSettings(req.syncCode, partial));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ---------- Exports ----------
+
+const { buildStatementData, buildXlsx, buildPdf, PDFDocument } = require("./export");
+
+function exportMonth(req) {
+  const m = (req.query.month || "").toString();
+  return MONTH_RE.test(m) ? m : new Date().toISOString().slice(0, 7);
+}
+
+app.get("/api/export/xlsx", requireCode, async (req, res, next) => {
+  try {
+    const month = exportMonth(req);
+    const data = await buildStatementData(req.syncCode, month);
+    const wb = await buildXlsx(data);
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    res.setHeader("Content-Disposition", `attachment; filename="Financials_${month}.xlsx"`);
+    await wb.xlsx.write(res);
+    res.end();
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get("/api/export/pdf", requireCode, async (req, res, next) => {
+  try {
+    const month = exportMonth(req);
+    const data = await buildStatementData(req.syncCode, month);
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="Financials_${month}.pdf"`);
+    const doc = new PDFDocument({ margin: 40 });
+    doc.pipe(res);
+    buildPdf(doc, data);
+    doc.end();
   } catch (err) {
     next(err);
   }
