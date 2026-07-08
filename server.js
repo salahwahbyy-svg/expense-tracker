@@ -190,6 +190,66 @@ app.get("/api/fin/categories", (req, res) => {
   });
 });
 
+// ---------- Income log ----------
+// Mirrors the expense log; entries feed the P&L income side automatically.
+
+function sanitizeIncomeEntry(body) {
+  const { amount, category, note, date } = body || {};
+  if (typeof amount !== "number" || !Number.isFinite(amount) || amount <= 0 || amount > 10_000_000) {
+    return { error: "invalid_amount" };
+  }
+  if (typeof category !== "string" || !INCOME_CATEGORIES.includes(category)) {
+    return { error: "invalid_category" };
+  }
+  if (typeof date !== "string" || !DATE_RE.test(date)) {
+    return { error: "invalid_date" };
+  }
+  return { amount, category, note: typeof note === "string" ? note.slice(0, 200) : "", date };
+}
+
+app.get("/api/incomes", requireCode, async (req, res, next) => {
+  try {
+    res.json({ incomes: await db.getIncomes(req.syncCode) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.post("/api/incomes", requireCode, async (req, res, next) => {
+  const entry = sanitizeIncomeEntry(req.body);
+  if (entry.error) return res.status(400).json({ error: entry.error });
+  entry.id = generateCode() + Date.now().toString(36);
+  entry.createdAt = Date.now();
+  try {
+    await db.addIncome(req.syncCode, entry);
+    res.status(201).json(entry);
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.put("/api/incomes/:id", requireCode, async (req, res, next) => {
+  const entry = sanitizeIncomeEntry(req.body);
+  if (entry.error) return res.status(400).json({ error: entry.error });
+  try {
+    const updated = await db.updateIncome(req.syncCode, req.params.id, entry);
+    if (!updated) return res.status(404).json({ error: "not_found" });
+    res.json({ id: req.params.id, ...entry });
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.delete("/api/incomes/:id", requireCode, async (req, res, next) => {
+  try {
+    const deleted = await db.deleteIncome(req.syncCode, req.params.id);
+    if (!deleted) return res.status(404).json({ error: "not_found" });
+    res.status(204).end();
+  } catch (err) {
+    next(err);
+  }
+});
+
 function num(v) {
   const n = Number(v);
   return Number.isFinite(n) ? n : 0;
@@ -348,8 +408,8 @@ app.put("/api/fin/settings", requireCode, async (req, res, next) => {
 
 // ---------- Exports ----------
 
-const { buildStatementData, buildXlsx, buildPdf, PDFDocument } = require("./export");
-
+// exceljs/pdfkit add over a second to server boot, so the export module is
+// loaded on first use instead of at startup (require caches it after that).
 function exportMonth(req) {
   const m = (req.query.month || "").toString();
   return MONTH_RE.test(m) ? m : new Date().toISOString().slice(0, 7);
@@ -357,6 +417,7 @@ function exportMonth(req) {
 
 app.get("/api/export/xlsx", requireCode, async (req, res, next) => {
   try {
+    const { buildStatementData, buildXlsx } = require("./export");
     const month = exportMonth(req);
     const data = await buildStatementData(req.syncCode, month);
     const wb = await buildXlsx(data);
@@ -371,6 +432,7 @@ app.get("/api/export/xlsx", requireCode, async (req, res, next) => {
 
 app.get("/api/export/pdf", requireCode, async (req, res, next) => {
   try {
+    const { buildStatementData, buildPdf, PDFDocument } = require("./export");
     const month = exportMonth(req);
     const data = await buildStatementData(req.syncCode, month);
     res.setHeader("Content-Type", "application/pdf");

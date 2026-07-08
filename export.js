@@ -30,10 +30,11 @@ function assetEffectiveValue(a) {
 
 // Assemble everything both export formats need for one month.
 async function buildStatementData(code, month) {
-  const [expenses, categories, income, assets, liabilities, cf, settings] = await Promise.all([
+  const [expenses, categories, income, incomeLog, assets, liabilities, cf, settings] = await Promise.all([
     db.getExpenses(code),
     db.getCategories(code),
     db.getPnlIncome(code),
+    db.getIncomes(code),
     db.getAssets(code),
     db.getLiabilities(code),
     db.getCfItems(code),
@@ -52,7 +53,13 @@ async function buildStatementData(code, month) {
   });
   const totalExpense = Object.values(expTotals).reduce((s, v) => s + v, 0);
 
-  const monthIncome = income.filter((i) => i.month === month);
+  // Manual P&L income lines plus entries from the income log, as one list.
+  const monthIncome = [
+    ...income.filter((i) => i.month === month),
+    ...incomeLog
+      .filter((i) => i.date.slice(0, 7) === month)
+      .map((i) => ({ name: i.note || i.category, category: i.category, value: i.amount })),
+  ];
   const totalIncome = monthIncome.reduce((s, i) => s + (Number(i.value) || 0), 0);
 
   const unanimValue = (Number(settings.unanimValuation) || 0) * (Number(settings.unanimOwnership) || 0) / 100;

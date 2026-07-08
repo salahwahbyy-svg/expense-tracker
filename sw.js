@@ -1,5 +1,5 @@
-const CACHE = "expenses-v5";
-const ASSETS = ["./", "./index.html", "./styles.css", "./app.js", "./manifest.json"];
+const CACHE = "expenses-v7";
+const ASSETS = ["./", "./index.html", "./styles.css", "./app.js", "./manifest.json", "./icon.png"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(ASSETS)));
@@ -19,19 +19,32 @@ self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
 
   // Never cache API calls — always go to the network for live data.
-  if (url.pathname.startsWith("/api/")) {
+  if (url.pathname.startsWith("/api/") || event.request.method !== "GET") {
     return;
   }
 
-  // Network-first for everything else, so app updates show up immediately;
-  // fall back to cache only when offline.
+  // Cache-first with background refresh (stale-while-revalidate) for the app
+  // shell: the app must open instantly even when the server is cold-starting,
+  // so never block rendering on the network. Updated files are picked up in
+  // the background and served on the next open.
   event.respondWith(
-    fetch(event.request)
-      .then((res) => {
-        const clone = res.clone();
-        caches.open(CACHE).then((cache) => cache.put(event.request, clone));
-        return res;
-      })
-      .catch(() => caches.match(event.request))
+    caches.match(event.request).then((cached) => {
+      const refresh = fetch(event.request)
+        .then((res) => {
+          if (res && res.ok) {
+            const clone = res.clone();
+            caches.open(CACHE).then((cache) => cache.put(event.request, clone));
+          }
+          return res;
+        })
+        .catch(() => cached);
+      // Navigations to unknown paths fall back to the cached shell.
+      return (
+        cached ||
+        refresh.then(
+          (res) => res || (event.request.mode === "navigate" ? caches.match("./index.html") : res)
+        )
+      );
+    })
   );
 });

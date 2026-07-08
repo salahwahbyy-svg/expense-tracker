@@ -17,6 +17,20 @@
   const CODE_KEY = "expenses:syncCode";
   const CACHE_PREFIX = "expenses:cache:";
   const CATS_CACHE_PREFIX = "expenses:cats:";
+  const INCOME_CACHE_PREFIX = "expenses:incomes:";
+
+  // Income categories are fixed (they match the server's P&L categories);
+  // ids are the exact category strings stored on income entries.
+  const INCOME_CATS = [
+    { id: "Salary", label: "Salary", emoji: "💼", color: "#6cf0b8" },
+    { id: "Business Income", label: "Business", emoji: "🏪", color: "#5bc0ff" },
+    { id: "Investment Income", label: "Investment", emoji: "📈", color: "#c792ff" },
+    { id: "Other Income", label: "Other", emoji: "💰", color: "#ffd166" },
+  ];
+
+  function incomeCatById(id) {
+    return INCOME_CATS.find((c) => c.id === id) || { id, label: id, emoji: "💰", color: "#9494a3" };
+  }
 
   function currency(n) {
     const v = Number(n) || 0;
@@ -75,6 +89,41 @@
     if (!res.ok && res.status !== 404) throw new Error("delete_failed");
   }
 
+  // Income log API — mirrors the expense log endpoints.
+  async function apiFetchIncomes(code) {
+    const res = await fetch(`/api/incomes?code=${encodeURIComponent(code)}`);
+    if (!res.ok) throw new Error("fetch_failed");
+    const data = await res.json();
+    return data.incomes;
+  }
+
+  async function apiAddIncome(code, payload) {
+    const res = await fetch(`/api/incomes?code=${encodeURIComponent(code)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) throw new Error("add_failed");
+    return res.json();
+  }
+
+  async function apiUpdateIncome(code, id, payload) {
+    const res = await fetch(`/api/incomes/${encodeURIComponent(id)}?code=${encodeURIComponent(code)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) throw new Error("update_failed");
+    return res.json();
+  }
+
+  async function apiDeleteIncome(code, id) {
+    const res = await fetch(`/api/incomes/${encodeURIComponent(id)}?code=${encodeURIComponent(code)}`, {
+      method: "DELETE",
+    });
+    if (!res.ok && res.status !== 404) throw new Error("delete_failed");
+  }
+
   // Financial-statement API (assets, liabilities, income, cashflow, settings…)
   async function finApi(path, opts) {
     const sep = path.includes("?") ? "&" : "?";
@@ -100,8 +149,21 @@
     localStorage.setItem(CACHE_PREFIX + code, JSON.stringify(list));
   }
 
+  function readIncomeCache(code) {
+    try {
+      return JSON.parse(localStorage.getItem(INCOME_CACHE_PREFIX + code)) || [];
+    } catch {
+      return [];
+    }
+  }
+
+  function writeIncomeCache(code, list) {
+    localStorage.setItem(INCOME_CACHE_PREFIX + code, JSON.stringify(list));
+  }
+
   let syncCode = localStorage.getItem(CODE_KEY) || "";
   let expenses = syncCode ? readCache(syncCode) : [];
+  let incomes = syncCode ? readIncomeCache(syncCode) : [];
 
   // ---- expense categories (dynamic) ----
   function readCatsCache(code) {
@@ -417,6 +479,124 @@
     renderList(list);
   }
 
+  // ================= INCOME TAB =================
+
+  function incomesForMonth(d) {
+    return incomes.filter((e) => {
+      const ed = new Date(e.date + "T00:00:00");
+      return ed.getFullYear() === d.getFullYear() && ed.getMonth() === d.getMonth();
+    });
+  }
+
+  function renderIncome() {
+    const list = incomesForMonth(viewDate);
+    const total = list.reduce((s, e) => s + (Number(e.amount) || 0), 0);
+
+    const totalsByCat = {};
+    list.forEach((e) => {
+      totalsByCat[e.category] = (totalsByCat[e.category] || 0) + (Number(e.amount) || 0);
+    });
+    const bars = Object.entries(totalsByCat)
+      .sort((a, b) => b[1] - a[1])
+      .map(([id, v]) => {
+        const cat = incomeCatById(id);
+        const pct = total > 0 ? (v / total) * 100 : 0;
+        return `
+          <div class="bar-row">
+            <span class="bar-dot" style="background:${escAttr(cat.color)}"></span>
+            <span class="bar-label">${escapeHtml(cat.label)}</span>
+            <span class="bar-track"><span class="bar-fill" style="width:${pct}%;background:${escAttr(cat.color)}"></span></span>
+            <span class="bar-amount">${currency(v)}</span>
+          </div>`;
+      })
+      .join("");
+
+    const sorted = [...list].sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : b.createdAt - a.createdAt));
+    const groups = new Map();
+    sorted.forEach((e) => {
+      if (!groups.has(e.date)) groups.set(e.date, []);
+      groups.get(e.date).push(e);
+    });
+    let listHtml = "";
+    groups.forEach((items, date) => {
+      const dayTotal = items.reduce((s, e) => s + (Number(e.amount) || 0), 0);
+      const rows = items
+        .map((e) => {
+          const cat = incomeCatById(e.category);
+          return `
+            <div class="expense-item income-item" data-id="${escAttr(e.id)}">
+              <div class="swipe-content">
+                <div class="expense-icon" style="background:${escAttr(cat.color)}22;color:${escAttr(cat.color)}">${escapeHtml(cat.emoji)}</div>
+                <div class="expense-meta">
+                  <div class="expense-category">${escapeHtml(cat.label)}</div>
+                  ${e.note ? `<div class="expense-note">${escapeHtml(e.note)}</div>` : ""}
+                </div>
+                <div class="expense-amount pos">+${currency(e.amount)}</div>
+              </div>
+            </div>`;
+        })
+        .join("");
+      listHtml += `
+        <div class="day-group">
+          <div class="day-heading"><span>${escapeHtml(formatDayHeading(date))}</span><span class="day-total">${currency(dayTotal)}</span></div>
+          ${rows}
+        </div>`;
+    });
+
+    return `
+      <section class="totals">
+        <div class="total-amount pos">${currency(total)}</div>
+        <div class="total-sub">earned this month</div>
+      </section>
+      ${bars ? `<section class="chart-card"><div class="chart-title"><span>By category</span></div><div class="bars">${bars}</div></section>` : ""}
+      <section class="list-section">
+        ${listHtml || '<div class="empty-state" style="display:flex;"><div class="empty-emoji">💰</div><div>No income yet this month</div></div>'}
+      </section>
+    `;
+  }
+
+  function wireIncome() {
+    finView.querySelectorAll(".income-item").forEach((el) => {
+      el.addEventListener("click", () => {
+        const entry = incomes.find((x) => x.id === el.dataset.id);
+        if (entry) openIncomeSheet(entry);
+      });
+    });
+  }
+
+  function openIncomeSheet(entry) {
+    openFinSheet({
+      title: entry ? "Edit income" : "Add income",
+      chips: { label: "Category", options: INCOME_CATS, selected: entry ? incomeCatById(entry.category) : null },
+      fields: [
+        { key: "amount", label: "Amount (E£)", type: "num", placeholder: "0", value: entry ? entry.amount : "" },
+        { key: "note", label: "Note (optional)", placeholder: "e.g. July salary", value: entry ? entry.note || "" : "" },
+        { key: "date", label: "Date", type: "date", value: entry ? entry.date : todayStr() },
+      ],
+      onSave: async (cat, values) => {
+        if (!values.amount || values.amount <= 0) throw new Error("invalid_amount");
+        const payload = { amount: values.amount, category: cat.id, note: values.note, date: values.date };
+        if (entry) {
+          const updated = await apiUpdateIncome(syncCode, entry.id, payload);
+          incomes = incomes.map((x) => (x.id === entry.id ? { ...x, ...updated } : x));
+        } else {
+          const created = await apiAddIncome(syncCode, payload);
+          incomes.push(created);
+        }
+        writeIncomeCache(syncCode, incomes);
+      },
+      onDelete: entry
+        ? async () => {
+            const label = `${currency(entry.amount)}${entry.note ? " · " + entry.note : ""}`;
+            if (!confirm(`Delete this income?\n${label}`)) return false;
+            await apiDeleteIncome(syncCode, entry.id);
+            incomes = incomes.filter((x) => x.id !== entry.id);
+            writeIncomeCache(syncCode, incomes);
+          }
+        : null,
+    });
+  }
+
   // ================= FINANCIAL STATEMENTS =================
 
   async function loadFin() {
@@ -488,9 +668,13 @@
   }
 
   function incomeTotalForMonth(m) {
-    return fin.income
+    const manual = fin.income
       .filter((i) => i.month === m)
       .reduce((sum, i) => sum + (Number(i.value) || 0), 0);
+    const logged = incomes
+      .filter((i) => i.date.slice(0, 7) === m)
+      .reduce((sum, i) => sum + (Number(i.amount) || 0), 0);
+    return manual + logged;
   }
 
   function endingCashBalance(uptoMonth) {
@@ -527,9 +711,10 @@
 
   function openFinSheet(config) {
     finSheetConfig = config;
-    finSheetChip = config.chips ? config.chips.options[0] : null;
+    finSheetChip = config.chips ? config.chips.selected || config.chips.options[0] : null;
     finSheetTitle.textContent = config.title;
     renderFinSheetFields();
+    finDeleteBtn.style.display = config.onDelete ? "block" : "none";
     finSheetOverlay.classList.add("open");
   }
 
@@ -546,12 +731,13 @@
     }
     const fields = typeof cfg.fields === "function" ? cfg.fields(finSheetChip) : cfg.fields;
     fields.forEach((f) => {
+      const type = f.type === "num" ? "number" : f.type === "date" ? "date" : "text";
+      const extra = f.type === "num" ? 'inputmode="decimal" step="0.01"' : f.type === "date" ? "" : 'maxlength="60"';
       html += `
         <div class="field">
           <label>${escapeHtml(f.label)}</label>
-          <input id="finField_${f.key}" type="${f.type === "num" ? "number" : "text"}"
-            ${f.type === "num" ? 'inputmode="decimal" step="0.01"' : `maxlength="60"`}
-            placeholder="${escAttr(f.placeholder || "")}" />
+          <input id="finField_${f.key}" type="${type}" ${extra}
+            value="${escAttr(f.value ?? "")}" placeholder="${escAttr(f.placeholder || "")}" />
         </div>`;
     });
     finSheetFields.innerHTML = html;
@@ -576,7 +762,7 @@
     const values = {};
     for (const f of fields) {
       const el = document.getElementById("finField_" + f.key);
-      values[f.key] = f.type === "num" ? Number(el.value) || 0 : el.value.trim();
+      values[f.key] = f.type === "num" ? Number(el.value) || 0 : f.type === "date" ? el.value || todayStr() : el.value.trim();
     }
     finSaveBtn.disabled = true;
     try {
@@ -593,6 +779,19 @@
   document.getElementById("finCancelBtn").addEventListener("click", closeFinSheet);
   finSheetOverlay.addEventListener("click", (e) => {
     if (e.target === finSheetOverlay) closeFinSheet();
+  });
+
+  const finDeleteBtn = document.getElementById("finDeleteBtn");
+  finDeleteBtn.addEventListener("click", async () => {
+    if (!finSheetConfig || !finSheetConfig.onDelete) return;
+    try {
+      // onDelete returns false when the user cancels its confirm dialog.
+      if ((await finSheetConfig.onDelete()) === false) return;
+      closeFinSheet();
+      renderFin();
+    } catch {
+      alert("Couldn't delete — check your connection and try again.");
+    }
   });
 
   // ---------- fin row helpers ----------
@@ -747,7 +946,7 @@
       <div class="fin-card">
         <div class="fin-card-title">Income vs Expense · ${year}</div>
         <svg width="100%" height="128" viewBox="0 0 348 128" style="overflow:visible;">${bars}</svg>
-        <div class="fin-note"><span style="color:var(--entertainment)">■</span> Income &nbsp; <span style="color:var(--danger)">■</span> Expenses (from your expense log)</div>
+        <div class="fin-note"><span style="color:var(--entertainment)">■</span> Income &nbsp; <span style="color:var(--danger)">■</span> Expenses (from your income &amp; expense logs)</div>
       </div>
 
       <div class="fin-card">
@@ -918,14 +1117,32 @@
     const monthly = fin.pnlView === "monthly";
     const inRange = (mm) => (monthly ? mm === m : mm.slice(0, 4) === year);
 
+    // Income = the income log (entered on the Income tab) plus any manual
+    // line items from before the Income tab existed (still editable here).
     const incomeItems = fin.income.filter((i) => inRange(i.month));
-    const totalIncome = incomeItems.reduce((s, i) => s + (Number(i.value) || 0), 0);
+    const logTotals = {};
+    incomes
+      .filter((i) => inRange(i.date.slice(0, 7)))
+      .forEach((i) => {
+        logTotals[i.category] = (logTotals[i.category] || 0) + (Number(i.amount) || 0);
+      });
+    const manualTotal = incomeItems.reduce((s, i) => s + (Number(i.value) || 0), 0);
+    const logTotal = Object.values(logTotals).reduce((s, v) => s + v, 0);
+    const totalIncome = manualTotal + logTotal;
 
     const incomeSections = fin.cats.incomeCategories
       .map((cat) => {
         const items = incomeItems.filter((i) => i.category === cat);
-        if (items.length === 0) return "";
-        const subtotal = items.reduce((s, i) => s + (Number(i.value) || 0), 0);
+        const logAmt = logTotals[cat] || 0;
+        if (items.length === 0 && logAmt === 0) return "";
+        const subtotal = items.reduce((s, i) => s + (Number(i.value) || 0), 0) + logAmt;
+        const logRow = logAmt
+          ? `<div class="fin-row readonly">
+              <span style="font-size:16px;">${escapeHtml(incomeCatById(cat).emoji)}</span>
+              <span class="f-name" style="flex:1.4;font-size:14px;">From income log</span>
+              <span class="row-amount">${currency(logAmt)}</span>
+            </div>`
+          : "";
         const rows = items
           .map((i) =>
             finRowHtml(i, {
@@ -936,7 +1153,7 @@
             })
           )
           .join("");
-        return `<div class="fin-section"><div class="fin-section-heading"><span>${escapeHtml(cat)}</span><span class="subtotal">${currency(subtotal)}</span></div>${rows}</div>`;
+        return `<div class="fin-section"><div class="fin-section-heading"><span>${escapeHtml(cat)}</span><span class="subtotal">${currency(subtotal)}</span></div>${logRow}${rows}</div>`;
       })
       .join("");
 
@@ -983,8 +1200,8 @@
 
       <div class="fin-card" id="incomeCard">
         <div class="fin-card-title">Income</div>
+        <div class="fin-note">Filled automatically from your income log — add income in the Income tab.</div>
         ${incomeSections || '<div class="fin-note">No income entries for this period.</div>'}
-        <button class="fin-add-btn" id="addIncomeBtn">+ Add Income</button>
         <div class="fin-totals"><span>Total Income</span><span class="value pos">${currency(totalIncome)}</span></div>
       </div>
 
@@ -1044,23 +1261,6 @@
       }
     );
 
-    document.getElementById("addIncomeBtn").addEventListener("click", () => {
-      openFinSheet({
-        title: "Add income",
-        chips: { label: "Category", options: fin.cats.incomeCategories },
-        fields: [
-          { key: "name", label: "Description", placeholder: "e.g. July salary" },
-          { key: "value", label: "Amount (E£)", type: "num", placeholder: "0" },
-        ],
-        onSave: async (cat, values) => {
-          await finApi("income", {
-            method: "POST",
-            body: JSON.stringify({ category: cat, month: monthStr(viewDate), ...values }),
-          });
-          await reloadFin("income");
-        },
-      });
-    });
   }
 
   // ---------- CASH FLOW ----------
@@ -1156,6 +1356,13 @@
   // ---------- fin render dispatcher ----------
   function renderFin() {
     if (activeTab === "expenses") return;
+    // The income log lives outside the fin statements data, so it renders
+    // even before (or without) fin data loading.
+    if (activeTab === "income") {
+      finView.innerHTML = renderIncome();
+      wireIncome();
+      return;
+    }
     if (!fin.loaded) {
       if (fin.failed) {
         finView.innerHTML =
@@ -1271,7 +1478,10 @@
     }
   });
 
-  document.getElementById("fab").addEventListener("click", () => openSheet());
+  document.getElementById("fab").addEventListener("click", () => {
+    if (activeTab === "income") openIncomeSheet();
+    else openSheet();
+  });
   document.getElementById("cancelBtn").addEventListener("click", closeSheet);
   sheetOverlay.addEventListener("click", (e) => {
     if (e.target === sheetOverlay) closeSheet();
@@ -1455,8 +1665,9 @@
   async function loadFromServer() {
     setSyncStatus("syncing");
     expenses = readCache(syncCode);
+    incomes = readIncomeCache(syncCode);
     renderAll();
-    // Expenses, categories and financial data are independent — parallel.
+    // Expenses, incomes, categories and financial data are independent — parallel.
     await Promise.all([
       (async () => {
         try {
@@ -1465,6 +1676,14 @@
           setSyncStatus("online");
         } catch {
           setSyncStatus("offline");
+        }
+      })(),
+      (async () => {
+        try {
+          incomes = await apiFetchIncomes(syncCode);
+          writeIncomeCache(syncCode, incomes);
+        } catch {
+          /* keep cached list */
         }
       })(),
       loadCats(),

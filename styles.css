@@ -307,6 +307,9 @@ html, body {
   position: fixed;
   right: 24px;
   bottom: calc(28px + var(--safe-bottom));
+  /* Above scrolling list content (which otherwise paints over it) and the
+     tabbar (5), below sheet overlays (10). */
+  z-index: 6;
   width: 58px;
   height: 58px;
   border-radius: 50%;
@@ -522,7 +525,7 @@ html, body {
 
 .fab { bottom: calc(76px + var(--safe-bottom)); }
 
-.app:not([data-tab="expenses"]) .fab { display: none; }
+.app:not([data-tab="expenses"]):not([data-tab="income"]) .fab { display: none; }
 
 /* ---------- Financial statements ---------- */
 

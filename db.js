@@ -18,6 +18,15 @@ const ready = client.batch(
       date TEXT NOT NULL,
       created_at INTEGER NOT NULL
     )`,
+    `CREATE TABLE IF NOT EXISTS incomes (
+      id TEXT PRIMARY KEY,
+      sync_code TEXT NOT NULL,
+      amount REAL NOT NULL,
+      category TEXT NOT NULL,
+      note TEXT,
+      date TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    )`,
     `CREATE TABLE IF NOT EXISTS assets (
       id TEXT PRIMARY KEY,
       sync_code TEXT NOT NULL,
@@ -74,6 +83,7 @@ const ready = client.batch(
       unanim_ownership REAL DEFAULT 0
     )`,
     `CREATE INDEX IF NOT EXISTS idx_expenses_sync_code ON expenses (sync_code)`,
+    `CREATE INDEX IF NOT EXISTS idx_incomes_sync_code ON incomes (sync_code)`,
     `CREATE INDEX IF NOT EXISTS idx_assets_sync_code ON assets (sync_code)`,
     `CREATE INDEX IF NOT EXISTS idx_liabilities_sync_code ON liabilities (sync_code)`,
     `CREATE INDEX IF NOT EXISTS idx_pnl_income_sync_code ON pnl_income (sync_code)`,
@@ -162,48 +172,67 @@ async function deleteRow(table, code, id) {
   return result.rowsAffected > 0;
 }
 
+// Expenses and incomes are the same shape (a dated log of amounts), so both
+// use this helper bound to their own table.
+function datedLog(table) {
+  return {
+    async get(code) {
+      await ready;
+      const result = await client.execute({
+        sql: `SELECT id, amount, category, note, date, created_at as createdAt FROM ${table} WHERE sync_code = ? ORDER BY created_at DESC`,
+        args: [code],
+      });
+      return result.rows.map((r) => ({
+        id: r.id,
+        amount: r.amount,
+        category: r.category,
+        note: r.note,
+        date: r.date,
+        createdAt: Number(r.createdAt),
+      }));
+    },
+
+    async add(code, entry) {
+      await ready;
+      await client.execute({
+        sql: `INSERT INTO ${table} (id, sync_code, amount, category, note, date, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        args: [entry.id, code, entry.amount, entry.category, entry.note, entry.date, entry.createdAt],
+      });
+    },
+
+    async update(code, id, entry) {
+      await ready;
+      const result = await client.execute({
+        sql: `UPDATE ${table} SET amount = ?, category = ?, note = ?, date = ? WHERE id = ? AND sync_code = ?`,
+        args: [entry.amount, entry.category, entry.note, entry.date, id, code],
+      });
+      return result.rowsAffected > 0;
+    },
+
+    async remove(code, id) {
+      await ready;
+      const result = await client.execute({
+        sql: `DELETE FROM ${table} WHERE id = ? AND sync_code = ?`,
+        args: [id, code],
+      });
+      return result.rowsAffected > 0;
+    },
+  };
+}
+
+const expensesLog = datedLog("expenses");
+const incomesLog = datedLog("incomes");
+
 module.exports = {
-  async getExpenses(code) {
-    await ready;
-    const result = await client.execute({
-      sql: "SELECT id, amount, category, note, date, created_at as createdAt FROM expenses WHERE sync_code = ? ORDER BY created_at DESC",
-      args: [code],
-    });
-    return result.rows.map((r) => ({
-      id: r.id,
-      amount: r.amount,
-      category: r.category,
-      note: r.note,
-      date: r.date,
-      createdAt: Number(r.createdAt),
-    }));
-  },
+  getExpenses: expensesLog.get,
+  addExpense: expensesLog.add,
+  updateExpense: expensesLog.update,
+  deleteExpense: expensesLog.remove,
 
-  async addExpense(code, expense) {
-    await ready;
-    await client.execute({
-      sql: "INSERT INTO expenses (id, sync_code, amount, category, note, date, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-      args: [expense.id, code, expense.amount, expense.category, expense.note, expense.date, expense.createdAt],
-    });
-  },
-
-  async updateExpense(code, id, expense) {
-    await ready;
-    const result = await client.execute({
-      sql: "UPDATE expenses SET amount = ?, category = ?, note = ?, date = ? WHERE id = ? AND sync_code = ?",
-      args: [expense.amount, expense.category, expense.note, expense.date, id, code],
-    });
-    return result.rowsAffected > 0;
-  },
-
-  async deleteExpense(code, id) {
-    await ready;
-    const result = await client.execute({
-      sql: "DELETE FROM expenses WHERE id = ? AND sync_code = ?",
-      args: [id, code],
-    });
-    return result.rowsAffected > 0;
-  },
+  getIncomes: incomesLog.get,
+  addIncome: incomesLog.add,
+  updateIncome: incomesLog.update,
+  deleteIncome: incomesLog.remove,
 
   // ---------- assets ----------
   getAssets: (code) => getRows("assets", code),

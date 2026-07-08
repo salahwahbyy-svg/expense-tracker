@@ -54,6 +54,7 @@
 
 <nav class="tabbar">
   <button class="tab active" data-tab="expenses"><span class="tab-icon">🧾</span><span>Spend</span></button>
+  <button class="tab" data-tab="income"><span class="tab-icon">💰</span><span>Income</span></button>
   <button class="tab" data-tab="overview"><span class="tab-icon">📊</span><span>Overview</span></button>
   <button class="tab" data-tab="balance"><span class="tab-icon">⚖️</span><span>Balance</span></button>
   <button class="tab" data-tab="pnl"><span class="tab-icon">📈</span><span>P&amp;L</span></button>
@@ -103,6 +104,7 @@
     <div class="sheet-handle"></div>
     <h2 class="sheet-title" id="finSheetTitle">Add item</h2>
     <div id="finSheetFields"></div>
+    <button id="finDeleteBtn" class="btn btn-danger" style="display:none;">Delete</button>
     <div class="sheet-actions">
       <button id="finCancelBtn" class="btn btn-secondary">Cancel</button>
       <button id="finSaveBtn" class="btn btn-primary">Save</button>
