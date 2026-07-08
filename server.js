@@ -352,6 +352,97 @@ finCrud("income", {
   sanitize: (b, partial) => pick(b, partial, { category: INCOME_CATEGORIES, name: "name", value: "num", month: "month" }),
 });
 
+// ---------- Depreciation ----------
+// Categories carry the straight-line useful life (years); items reference a
+// category and depreciate from their purchase date automatically.
+
+const DEP_YEARS_MIN = 1;
+const DEP_YEARS_MAX = 50;
+
+function sanitizeDepYears(v) {
+  const n = Math.round(Number(v));
+  return Number.isFinite(n) && n >= DEP_YEARS_MIN && n <= DEP_YEARS_MAX ? n : null;
+}
+
+app.get("/api/fin/depcats", requireCode, async (req, res, next) => {
+  try {
+    res.json(await db.getDepCats(req.syncCode));
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.post("/api/fin/depcats", requireCode, async (req, res, next) => {
+  const b = req.body || {};
+  if (typeof b.label !== "string" || !b.label.trim()) return res.status(400).json({ error: "invalid_label" });
+  const years = sanitizeDepYears(b.years);
+  if (!years) return res.status(400).json({ error: "invalid_years" });
+  const label = b.label.trim().slice(0, 24);
+  const base = label.toLowerCase().replace(/[^a-z0-9]+/g, "").slice(0, 16) || "cat";
+  try {
+    const existing = new Set((await db.getDepCats(req.syncCode)).map((c) => c.id));
+    let id = base;
+    let n = 2;
+    while (existing.has(id)) id = base + n++;
+    res.status(201).json(await db.addDepCat(req.syncCode, { id, label, years }));
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.put("/api/fin/depcats/:id", requireCode, async (req, res, next) => {
+  const b = req.body || {};
+  const fields = {};
+  if ("label" in b) {
+    if (typeof b.label !== "string" || !b.label.trim()) return res.status(400).json({ error: "invalid_label" });
+    fields.label = b.label.trim().slice(0, 24);
+  }
+  if ("years" in b) {
+    const years = sanitizeDepYears(b.years);
+    if (!years) return res.status(400).json({ error: "invalid_years" });
+    fields.years = years;
+  }
+  try {
+    const ok = await db.updateDepCat(req.syncCode, req.params.id, fields);
+    if (!ok) return res.status(404).json({ error: "not_found" });
+    res.json({ id: req.params.id, ...fields });
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.delete("/api/fin/depcats/:id", requireCode, async (req, res, next) => {
+  try {
+    const removedItems = await db.deleteDepCat(req.syncCode, req.params.id);
+    if (removedItems === null) return res.status(404).json({ error: "not_found" });
+    res.json({ removedItems });
+  } catch (err) {
+    next(err);
+  }
+});
+
+finCrud("depitems", {
+  get: db.getDepItems,
+  add: db.addDepItem,
+  update: db.updateDepItem,
+  remove: db.deleteDepItem,
+  sanitize: (b, partial) => {
+    const out = pick(b, partial, { name: "name", cost: "num" });
+    if (!out) return null;
+    if (!partial || "category" in b) {
+      if (typeof b.category !== "string" || !CATEGORY_ID_RE.test(b.category)) return null;
+      out.category = b.category;
+    }
+    if (!partial || "date" in b) {
+      if (typeof b.date !== "string" || !DATE_RE.test(b.date)) {
+        if (partial) return null;
+        out.date = new Date().toISOString().slice(0, 10);
+      } else out.date = b.date;
+    }
+    return out;
+  },
+});
+
 finCrud("cashflow", {
   get: db.getCfItems,
   add: db.addCfItem,

@@ -75,6 +75,22 @@ const ready = client.batch(
       sort INTEGER DEFAULT 0,
       PRIMARY KEY (sync_code, id)
     )`,
+    `CREATE TABLE IF NOT EXISTS dep_categories (
+      sync_code TEXT NOT NULL,
+      id TEXT NOT NULL,
+      label TEXT NOT NULL,
+      years INTEGER DEFAULT 5,
+      sort INTEGER DEFAULT 0,
+      PRIMARY KEY (sync_code, id)
+    )`,
+    `CREATE TABLE IF NOT EXISTS dep_items (
+      id TEXT PRIMARY KEY,
+      sync_code TEXT NOT NULL,
+      category TEXT NOT NULL,
+      name TEXT DEFAULT '',
+      cost REAL DEFAULT 0,
+      date TEXT NOT NULL
+    )`,
     `CREATE TABLE IF NOT EXISTS fin_settings (
       sync_code TEXT PRIMARY KEY,
       exchange_rate REAL DEFAULT 47.5,
@@ -84,6 +100,7 @@ const ready = client.batch(
     )`,
     `CREATE INDEX IF NOT EXISTS idx_expenses_sync_code ON expenses (sync_code)`,
     `CREATE INDEX IF NOT EXISTS idx_incomes_sync_code ON incomes (sync_code)`,
+    `CREATE INDEX IF NOT EXISTS idx_dep_items_sync_code ON dep_items (sync_code)`,
     `CREATE INDEX IF NOT EXISTS idx_assets_sync_code ON assets (sync_code)`,
     `CREATE INDEX IF NOT EXISTS idx_liabilities_sync_code ON liabilities (sync_code)`,
     `CREATE INDEX IF NOT EXISTS idx_pnl_income_sync_code ON pnl_income (sync_code)`,
@@ -102,6 +119,14 @@ const ready = client.batch(
 function genId() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 9);
 }
+
+// Seeded for every new sync code; label + straight-line useful life.
+const DEFAULT_DEP_CATEGORIES = [
+  { id: "furniture", label: "Furniture", years: 7 },
+  { id: "computers", label: "Computers & Laptops", years: 5 },
+  { id: "vehicles", label: "Vehicles", years: 5 },
+  { id: "equipment", label: "Equipment", years: 10 },
+];
 
 // Seeded for every new sync code; 'other' is permanent and is the
 // reassignment target when a category with expenses is deleted.
@@ -327,6 +352,73 @@ module.exports = {
     });
     return Number(result.rows[0].n);
   },
+
+  // ---------- depreciation ----------
+  async getDepCats(code) {
+    await ready;
+    let result = await client.execute({
+      sql: "SELECT id, label, years FROM dep_categories WHERE sync_code = ? ORDER BY sort ASC, rowid ASC",
+      args: [code],
+    });
+    if (result.rows.length === 0) {
+      await client.batch(
+        DEFAULT_DEP_CATEGORIES.map((c, i) => ({
+          sql: "INSERT OR IGNORE INTO dep_categories (sync_code, id, label, years, sort) VALUES (?, ?, ?, ?, ?)",
+          args: [code, c.id, c.label, c.years, i],
+        })),
+        "write"
+      );
+      result = await client.execute({
+        sql: "SELECT id, label, years FROM dep_categories WHERE sync_code = ? ORDER BY sort ASC, rowid ASC",
+        args: [code],
+      });
+    }
+    return result.rows;
+  },
+
+  async addDepCat(code, cat) {
+    await ready;
+    await client.execute({
+      sql: "INSERT INTO dep_categories (sync_code, id, label, years, sort) VALUES (?, ?, ?, ?, ?)",
+      args: [code, cat.id, cat.label, cat.years, Date.now()],
+    });
+    return cat;
+  },
+
+  async updateDepCat(code, id, fields) {
+    await ready;
+    const allowed = ["label", "years"];
+    const sets = Object.keys(fields).filter((k) => allowed.includes(k));
+    if (sets.length === 0) return true;
+    const setClause = sets.map((k) => `${k} = ?`).join(",");
+    const result = await client.execute({
+      sql: `UPDATE dep_categories SET ${setClause} WHERE sync_code = ? AND id = ?`,
+      args: [...sets.map((k) => fields[k]), code, id],
+    });
+    return result.rowsAffected > 0;
+  },
+
+  // Deleting a depreciation category removes its items too (they can't be
+  // depreciated without a useful life). Returns how many items were removed,
+  // or null if the category wasn't found.
+  async deleteDepCat(code, id) {
+    await ready;
+    const del = await client.execute({
+      sql: "DELETE FROM dep_categories WHERE sync_code = ? AND id = ?",
+      args: [code, id],
+    });
+    if (del.rowsAffected === 0) return null;
+    const items = await client.execute({
+      sql: "DELETE FROM dep_items WHERE sync_code = ? AND category = ?",
+      args: [code, id],
+    });
+    return items.rowsAffected;
+  },
+
+  getDepItems: (code) => getRows("dep_items", code),
+  addDepItem: (code, f) => insertRow("dep_items", code, { category: f.category, name: f.name || "", cost: f.cost || 0, date: f.date }),
+  updateDepItem: (code, id, f) => updateRow("dep_items", code, id, ["category", "name", "cost", "date"], f),
+  deleteDepItem: (code, id) => deleteRow("dep_items", code, id),
 
   // ---------- net worth history ----------
   async getNetWorthHistory(code) {

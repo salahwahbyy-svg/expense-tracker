@@ -30,7 +30,7 @@ function assetEffectiveValue(a) {
 
 // Assemble everything both export formats need for one month.
 async function buildStatementData(code, month) {
-  const [expenses, categories, income, incomeLog, assets, liabilities, cf, settings] = await Promise.all([
+  const [expenses, categories, income, incomeLog, assets, liabilities, cf, settings, depCats, depItems] = await Promise.all([
     db.getExpenses(code),
     db.getCategories(code),
     db.getPnlIncome(code),
@@ -39,6 +39,8 @@ async function buildStatementData(code, month) {
     db.getLiabilities(code),
     db.getCfItems(code),
     db.getSettings(code),
+    db.getDepCats(code),
+    db.getDepItems(code),
   ]);
 
   const catById = {};
@@ -66,12 +68,34 @@ async function buildStatementData(code, month) {
   const totalAssets = assets.reduce((s, a) => s + assetEffectiveValue(a), 0) + unanimValue;
   const totalLiabilities = liabilities.reduce((s, l) => s + (Number(l.value) || 0), 0);
 
+  // Straight-line depreciation for this month: cost / (years × 12) for each
+  // item whose useful life covers the month.
+  const yearsByCat = {};
+  depCats.forEach((c) => (yearsByCat[c.id] = Number(c.years) || 0));
+  const monthIdx = (m) => Number(m.slice(0, 4)) * 12 + Number(m.slice(5, 7)) - 1;
+  const cur = monthIdx(month);
+  const depRows = [];
+  let depreciation = 0;
+  depItems.forEach((it) => {
+    const years = yearsByCat[it.category];
+    if (!years) return;
+    const months = years * 12;
+    const start = monthIdx(String(it.date).slice(0, 7));
+    if (cur >= start && cur < start + months) {
+      const dep = (Number(it.cost) || 0) / months;
+      depreciation += dep;
+      const cat = depCats.find((c) => c.id === it.category);
+      depRows.push({ name: it.name || (cat ? cat.label : it.category), category: cat ? `${cat.label} · ${years}y` : it.category, value: dep });
+    }
+  });
+
   const cogsSet = new Set(settings.cogsCategories || []);
   const cogs = Object.entries(expTotals).reduce((s, [id, v]) => s + (cogsSet.has(id) ? v : 0), 0);
   const interest = expTotals.interest && !cogsSet.has("interest") ? expTotals.interest : 0;
   const opex = totalExpense - cogs - interest;
   const grossProfit = totalIncome - cogs;
-  const ebit = grossProfit - opex;
+  const ebitda = grossProfit - opex;
+  const ebit = ebitda - depreciation;
   const ebt = ebit - interest;
   const taxRate = Number(settings.taxRate) || 0;
   const tax = ebt > 0 ? ebt * (taxRate / 100) : 0;
@@ -95,7 +119,9 @@ async function buildStatementData(code, month) {
     totalAssets,
     totalLiabilities,
     netWorth: totalAssets - totalLiabilities,
-    ratios: { cogs, grossProfit, opex, ebit, interest, ebt, taxRate, tax, netAfterTax: ebt - tax },
+    depRows,
+    depreciation,
+    ratios: { cogs, grossProfit, opex, ebitda, depreciation, ebit, interest, ebt, taxRate, tax, netAfterTax: ebt - tax },
     monthCf,
     endingCash: (Number(settings.startingCash) || 0) + priorFlows,
   };
@@ -190,12 +216,19 @@ async function buildXlsx(data) {
     .sort((a, b) => b[1] - a[1])
     .forEach(([id, v], i) => dataRow(pnl, [data.catLabel(id), "", v], { stripe: i % 2 === 0, color: data.catColor(id) }));
   totalRow(pnl, "Total Expenses", data.totalExpense, COLORS.expense);
+  if (data.depRows.length > 0) {
+    headerRow(pnl, ["Depreciation", "Category", "Value"]);
+    data.depRows.forEach((d, i) => dataRow(pnl, [d.name, d.category, d.value], { stripe: i % 2 === 0 }));
+    totalRow(pnl, "Total Depreciation", data.depreciation, COLORS.expense);
+  }
   const r = data.ratios;
   headerRow(pnl, ["Ratios", "", "Value"]);
   const pct = (v) => (data.totalIncome > 0 ? ` (${((v / data.totalIncome) * 100).toFixed(1)}%)` : "");
   dataRow(pnl, ["Cost of Sales (COGS)", "", r.cogs], { stripe: true });
   dataRow(pnl, [`Gross Profit${pct(r.grossProfit)}`, "", r.grossProfit], { color: COLORS.income });
   dataRow(pnl, ["Operating Expenses", "", r.opex], { stripe: true });
+  dataRow(pnl, [`EBITDA${pct(r.ebitda)}`, "", r.ebitda], { color: COLORS.accent });
+  dataRow(pnl, ["Depreciation", "", r.depreciation], { stripe: true });
   dataRow(pnl, [`EBIT${pct(r.ebit)}`, "", r.ebit], { color: COLORS.accent });
   dataRow(pnl, ["Interest", "", r.interest], { stripe: true });
   dataRow(pnl, ["EBT", "", r.ebt]);
@@ -276,6 +309,10 @@ function buildPdf(doc, data) {
     .sort((a, b) => b[1] - a[1])
     .forEach(([id, v], i) => pdfLine(doc, data.catLabel(id), v, { stripe: i % 2 === 0 }));
   pdfLine(doc, "Total Expenses", data.totalExpense, { color: COLORS.expense, bold: true });
+  if (data.depRows.length > 0) {
+    data.depRows.forEach((d, i) => pdfLine(doc, `Depreciation: ${d.name}  (${d.category})`, d.value, { stripe: i % 2 === 0 }));
+    pdfLine(doc, "Total Depreciation", data.depreciation, { color: COLORS.expense, bold: true });
+  }
   doc.moveDown(0.8);
 
   const r = data.ratios;
@@ -284,6 +321,8 @@ function buildPdf(doc, data) {
   pdfLine(doc, "Cost of Sales (COGS)", r.cogs, { stripe: true });
   pdfLine(doc, `Gross Profit${pct(r.grossProfit)}`, r.grossProfit, { color: COLORS.income, bold: true });
   pdfLine(doc, "Operating Expenses", r.opex, { stripe: true });
+  pdfLine(doc, `EBITDA${pct(r.ebitda)}`, r.ebitda, { color: COLORS.accent, bold: true });
+  pdfLine(doc, "Depreciation", r.depreciation, { stripe: true });
   pdfLine(doc, `EBIT${pct(r.ebit)}`, r.ebit, { color: COLORS.accent, bold: true });
   pdfLine(doc, "Interest", r.interest, { stripe: true });
   pdfLine(doc, "EBT", r.ebt);

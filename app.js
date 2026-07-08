@@ -217,6 +217,8 @@
     income: [],
     cf: [],
     history: [],
+    depcats: [],
+    depitems: [],
     pnlView: "monthly",
     cfView: "monthly",
   };
@@ -602,7 +604,7 @@
   async function loadFin() {
     if (!syncCode) return;
     try {
-      const [cats, settings, assets, liabilities, income, cf, history] = await Promise.all([
+      const [cats, settings, assets, liabilities, income, cf, history, depcats, depitems] = await Promise.all([
         finApi("categories"),
         finApi("settings"),
         finApi("assets"),
@@ -610,6 +612,8 @@
         finApi("income"),
         finApi("cashflow"),
         finApi("networth"),
+        finApi("depcats"),
+        finApi("depitems"),
       ]);
       fin.cats = cats;
       fin.settings = settings;
@@ -618,6 +622,8 @@
       fin.income = income;
       fin.cf = cf;
       fin.history = history;
+      fin.depcats = depcats;
+      fin.depitems = depitems;
       fin.loaded = true;
       fin.failed = false;
     } catch {
@@ -632,6 +638,8 @@
       else if (name === "liabilities") fin.liabilities = data;
       else if (name === "income") fin.income = data;
       else if (name === "cashflow") fin.cf = data;
+      else if (name === "depcats") fin.depcats = data;
+      else if (name === "depitems") fin.depitems = data;
     } catch {
       /* keep stale data */
     }
@@ -675,6 +683,39 @@
       .filter((i) => i.date.slice(0, 7) === m)
       .reduce((sum, i) => sum + (Number(i.amount) || 0), 0);
     return manual + logged;
+  }
+
+  // ---------- straight-line depreciation ----------
+  // Each item depreciates cost ÷ (years × 12) per month, starting its
+  // purchase month and stopping once fully depreciated. Years come from the
+  // item's depreciation category.
+  function monthKeyIdx(mk) {
+    return Number(mk.slice(0, 4)) * 12 + Number(mk.slice(5, 7)) - 1;
+  }
+
+  function depYearsById(id) {
+    const c = fin.depcats.find((c) => c.id === id);
+    return c ? Number(c.years) || 0 : 0;
+  }
+
+  function itemDepForMonthKey(it, years, mk) {
+    if (!years) return 0;
+    const months = years * 12;
+    const start = monthKeyIdx(String(it.date).slice(0, 7));
+    const cur = monthKeyIdx(mk);
+    return cur >= start && cur < start + months ? (Number(it.cost) || 0) / months : 0;
+  }
+
+  function itemDepForPeriod(it, monthly, mk, year) {
+    const years = depYearsById(it.category);
+    if (monthly) return itemDepForMonthKey(it, years, mk);
+    let s = 0;
+    for (let i = 1; i <= 12; i++) s += itemDepForMonthKey(it, years, `${year}-${String(i).padStart(2, "0")}`);
+    return s;
+  }
+
+  function depForMonth(mk) {
+    return fin.depitems.reduce((s, it) => s + itemDepForMonthKey(it, depYearsById(it.category), mk), 0);
   }
 
   function endingCashBalance(uptoMonth) {
@@ -799,7 +840,7 @@
     const fields = opts.fields
       .map((f) => {
         if (f.type === "label") return `<span class="row-amount">${currency(f.value)}</span>`;
-        return `<input class="${f.cls}" data-field="${f.key}" type="${f.num ? "number" : "text"}"
+        return `<input class="${f.cls}" data-field="${f.key}" type="${f.num ? "number" : f.date ? "date" : "text"}"
           ${f.num ? 'inputmode="decimal" step="0.01"' : ""}
           value="${escAttr(row[f.key] ?? "")}" placeholder="${escAttr(f.placeholder || "")}" />`;
       })
@@ -856,7 +897,7 @@
     const rate = fin.settings.exchangeRate;
     const income = incomeTotalForMonth(m);
     const spent = expenseTotalForMonth(m);
-    const netPL = income - spent;
+    const netPL = income - spent - depForMonth(m);
     const cash = endingCashBalance(m);
 
     // 12-month income vs expense bars
@@ -1173,9 +1214,32 @@
       })
       .join("");
 
-    const netPL = totalIncome - totalExpense;
+    // ---- depreciation (straight-line, per item from its purchase date) ----
+    const depPeriod = fin.depitems.reduce((s, it) => s + itemDepForPeriod(it, monthly, m, year), 0);
+    const depSections = fin.depcats
+      .map((cat) => {
+        const items = fin.depitems.filter((it) => it.category === cat.id);
+        if (items.length === 0) return "";
+        const subtotal = items.reduce((s, it) => s + itemDepForPeriod(it, monthly, m, year), 0);
+        const rows = items
+          .map((it) =>
+            finRowHtml(it, {
+              fields: [
+                { key: "name", cls: "f-name", placeholder: "Item" },
+                { key: "cost", cls: "f-num", num: true, placeholder: "Cost" },
+                { key: "date", cls: "f-date", date: true },
+                { type: "label", value: itemDepForPeriod(it, monthly, m, year) },
+              ],
+            })
+          )
+          .join("");
+        return `<div class="fin-section"><div class="fin-section-heading"><span>${escapeHtml(cat.label)} · ${Number(cat.years) || 0} yrs</span><span class="subtotal">${currency(subtotal)}</span></div>${rows}</div>`;
+      })
+      .join("");
 
-    // ---- ratios: GP, GP%, EBIT, EBT, net after tax ----
+    const netPL = totalIncome - totalExpense - depPeriod;
+
+    // ---- ratios: GP, GP%, EBITDA, EBIT, EBT, net after tax ----
     // Interest (the 'interest' category) sits below EBIT, unless the user
     // explicitly marked it as a direct cost.
     const cogsSet = new Set(fin.settings.cogsCategories || []);
@@ -1183,7 +1247,8 @@
     const interest = cogsSet.has("interest") ? 0 : expTotals.interest || 0;
     const opex = totalExpense - cogs - interest;
     const grossProfit = totalIncome - cogs;
-    const ebit = grossProfit - opex;
+    const ebitda = grossProfit - opex;
+    const ebit = ebitda - depPeriod;
     const ebt = ebit - interest;
     const pct = (v) => (totalIncome > 0 ? (v / totalIncome) * 100 : 0);
     const fmtPct = (v) => pct(v).toLocaleString("en-US", { maximumFractionDigits: 1 }) + "%";
@@ -1212,6 +1277,14 @@
         <div class="fin-totals"><span>Total Expenses</span><span class="value neg">${currency(totalExpense)}</span></div>
       </div>
 
+      <div class="fin-card" id="depCard">
+        <div class="fin-card-title">Depreciation <button class="snapshot-btn" id="editDepCatsBtn">✏️ Categories</button></div>
+        <div class="fin-note">Straight-line from each item's purchase date: cost ÷ (years × 12) per month. Amounts shown are this period's share.</div>
+        ${depSections || '<div class="fin-note">No depreciable items yet — add furniture, laptops, equipment…</div>'}
+        <button class="fin-add-btn" id="addDepItemBtn">+ Add Item</button>
+        <div class="fin-totals"><span>Total Depreciation</span><span class="value neg">${currency(depPeriod)}</span></div>
+      </div>
+
       <div class="fin-card">
         <div class="fin-totals" style="border-top:none;margin-top:0;padding-top:0;">
           <span>Net Profit / Loss</span>
@@ -1224,6 +1297,8 @@
         <div class="ratio-row"><span>Cost of Sales (COGS)</span><span class="value">${currency(cogs)}</span></div>
         <div class="ratio-row"><span>Gross Profit</span><span class="value ${signClass(grossProfit)}">${currency(grossProfit)} · ${fmtPct(grossProfit)}</span></div>
         <div class="ratio-row"><span>Operating Expenses</span><span class="value">${currency(opex)}</span></div>
+        <div class="ratio-row"><span>EBITDA</span><span class="value ${signClass(ebitda)}">${currency(ebitda)} · ${fmtPct(ebitda)}</span></div>
+        <div class="ratio-row"><span>Depreciation</span><span class="value">${currency(depPeriod)}</span></div>
         <div class="ratio-row"><span>EBIT</span><span class="value ${signClass(ebit)}">${currency(ebit)} · ${fmtPct(ebit)}</span></div>
         <div class="ratio-row"><span>Interest</span><span class="value">${currency(interest)}</span></div>
         <div class="ratio-row"><span>EBT</span><span class="value ${signClass(ebt)}">${currency(ebt)} · ${fmtPct(ebt)}</span></div>
@@ -1243,6 +1318,31 @@
     document.getElementById("pnlMonthly").addEventListener("click", () => { fin.pnlView = "monthly"; renderFin(); });
     document.getElementById("pnlYearly").addEventListener("click", () => { fin.pnlView = "yearly"; renderFin(); });
     wireFinRows(document.getElementById("incomeCard"), "income", ["value"], "income");
+    wireFinRows(document.getElementById("depCard"), "depitems", ["cost"], "depitems");
+
+    document.getElementById("editDepCatsBtn").addEventListener("click", openDepCatSheet);
+    document.getElementById("addDepItemBtn").addEventListener("click", () => {
+      if (fin.depcats.length === 0) {
+        openDepCatSheet();
+        return;
+      }
+      openFinSheet({
+        title: "Add depreciation item",
+        chips: {
+          label: "Category",
+          options: fin.depcats.map((c) => ({ id: c.id, label: `${c.label} · ${Number(c.years) || 0}y` })),
+        },
+        fields: [
+          { key: "name", label: "Item", placeholder: "e.g. MacBook Pro" },
+          { key: "cost", label: "Cost (E£)", type: "num", placeholder: "0" },
+          { key: "date", label: "Purchase date", type: "date", value: todayStr() },
+        ],
+        onSave: async (cat, values) => {
+          await finApi("depitems", { method: "POST", body: JSON.stringify({ category: cat.id, ...values }) });
+          await reloadFin("depitems");
+        },
+      });
+    });
 
     document.getElementById("taxRateInput").addEventListener("change", (e) => {
       const v = Math.min(100, Math.max(0, Number(e.target.value) || 0));
@@ -1262,6 +1362,81 @@
     );
 
   }
+
+  // ---------- depreciation category editor ----------
+  const DEP_YEARS_OPTIONS = [1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 15, 20, 25, 30];
+  const depCatSheetOverlay = document.getElementById("depCatSheetOverlay");
+  const depCatListEl = document.getElementById("depCatList");
+
+  function openDepCatSheet() {
+    renderDepCatRows();
+    depCatSheetOverlay.classList.add("open");
+  }
+
+  function closeDepCatSheet() {
+    depCatSheetOverlay.classList.remove("open");
+    renderFin();
+  }
+
+  function renderDepCatRows() {
+    depCatListEl.innerHTML = "";
+    fin.depcats.forEach((cat) => {
+      const years = Number(cat.years) || 5;
+      const opts = DEP_YEARS_OPTIONS.includes(years) ? DEP_YEARS_OPTIONS : [...DEP_YEARS_OPTIONS, years].sort((a, b) => a - b);
+      const row = document.createElement("div");
+      row.className = "cat-row";
+      row.innerHTML = `
+        <input class="cat-label" value="${escAttr(cat.label)}" maxlength="24" aria-label="Name" />
+        <select class="dep-years" aria-label="Useful life">
+          ${opts.map((y) => `<option value="${y}" ${years === y ? "selected" : ""}>${y} yr${y > 1 ? "s" : ""}</option>`).join("")}
+        </select>
+        <button class="row-del">✕</button>
+      `;
+
+      async function saveDepCat(fields) {
+        try {
+          await finApi(`depcats/${encodeURIComponent(cat.id)}`, { method: "PUT", body: JSON.stringify(fields) });
+          await reloadFin("depcats");
+        } catch {
+          alert("Couldn't save — check your connection.");
+        }
+        renderDepCatRows();
+      }
+
+      row.querySelector(".cat-label").addEventListener("change", (e) => {
+        if (e.target.value.trim()) saveDepCat({ label: e.target.value.trim() });
+        else renderDepCatRows();
+      });
+      row.querySelector(".dep-years").addEventListener("change", (e) => saveDepCat({ years: Number(e.target.value) }));
+      row.querySelector(".row-del").addEventListener("click", async () => {
+        const count = fin.depitems.filter((it) => it.category === cat.id).length;
+        if (!confirm(`Delete "${cat.label}"?${count ? `\n${count} item(s) in it will be removed too.` : ""}`)) return;
+        try {
+          await finApi(`depcats/${encodeURIComponent(cat.id)}`, { method: "DELETE" });
+          await Promise.all([reloadFin("depcats"), reloadFin("depitems")]);
+        } catch {
+          alert("Couldn't delete — check your connection.");
+        }
+        renderDepCatRows();
+      });
+
+      depCatListEl.appendChild(row);
+    });
+  }
+
+  document.getElementById("addDepCatBtn").addEventListener("click", async () => {
+    try {
+      await finApi("depcats", { method: "POST", body: JSON.stringify({ label: "New category", years: 5 }) });
+      await reloadFin("depcats");
+    } catch {
+      alert("Couldn't add — check your connection.");
+    }
+    renderDepCatRows();
+  });
+  document.getElementById("depCatCloseBtn").addEventListener("click", closeDepCatSheet);
+  depCatSheetOverlay.addEventListener("click", (e) => {
+    if (e.target === depCatSheetOverlay) closeDepCatSheet();
+  });
 
   // ---------- CASH FLOW ----------
   function renderCashflow() {
