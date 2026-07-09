@@ -652,12 +652,14 @@
     return Number(a.value) || 0;
   }
 
-  function computeNetWorth() {
+  function computeNetWorth(mk) {
+    const m = mk || monthStr(viewDate);
     const s = fin.settings;
     const unanimValue = (Number(s.unanimValuation) || 0) * (Number(s.unanimOwnership) || 0) / 100;
-    const totalAssets = fin.assets.reduce((sum, a) => sum + assetEffectiveValue(a), 0) + unanimValue;
+    const fixed = fixedAssetTotals(m);
+    const totalAssets = fin.assets.reduce((sum, a) => sum + assetEffectiveValue(a), 0) + unanimValue + fixed.nbv;
     const totalLiabilities = fin.liabilities.reduce((sum, l) => sum + (Number(l.value) || 0), 0);
-    return { totalAssets, totalLiabilities, unanimValue, netWorth: totalAssets - totalLiabilities };
+    return { totalAssets, totalLiabilities, unanimValue, fixed, netWorth: totalAssets - totalLiabilities };
   }
 
   // Expense log rolled up by month — this is what feeds the P&L expense side.
@@ -686,43 +688,50 @@
   }
 
   // ---------- straight-line depreciation ----------
-  // Each item depreciates cost ÷ (years × 12) per month, starting its
-  // purchase month and stopping once fully depreciated. Years come from the
-  // item's depreciation category.
-  function monthKeyIdx(mk) {
-    return Number(mk.slice(0, 4)) * 12 + Number(mk.slice(5, 7)) - 1;
-  }
-
+  // All math lives in the shared Depreciation module (depreciation.js) so
+  // the P&L expense, Balance Sheet book values, Cash Flow add-back, and the
+  // server exports can never disagree. Years come from the item's category.
   function depYearsById(id) {
     const c = fin.depcats.find((c) => c.id === id);
     return c ? Number(c.years) || 0 : 0;
   }
 
-  function itemDepForMonthKey(it, years, mk) {
-    if (!years) return 0;
-    const months = years * 12;
-    const start = monthKeyIdx(String(it.date).slice(0, 7));
-    const cur = monthKeyIdx(mk);
-    return cur >= start && cur < start + months ? (Number(it.cost) || 0) / months : 0;
-  }
-
   function itemDepForPeriod(it, monthly, mk, year) {
     const years = depYearsById(it.category);
-    if (monthly) return itemDepForMonthKey(it, years, mk);
-    let s = 0;
-    for (let i = 1; i <= 12; i++) s += itemDepForMonthKey(it, years, `${year}-${String(i).padStart(2, "0")}`);
-    return s;
+    return monthly ? Depreciation.forMonth(it, years, mk) : Depreciation.forYear(it, years, year);
   }
 
   function depForMonth(mk) {
-    return fin.depitems.reduce((s, it) => s + itemDepForMonthKey(it, depYearsById(it.category), mk), 0);
+    return fin.depitems.reduce((s, it) => s + Depreciation.forMonth(it, depYearsById(it.category), mk), 0);
   }
 
+  // Fixed-asset totals for the Balance Sheet as of month `mk`.
+  function fixedAssetTotals(mk) {
+    let cost = 0;
+    let accum = 0;
+    fin.depitems.forEach((it) => {
+      cost += Number(it.cost) || 0;
+      accum += Depreciation.accumulated(it, depYearsById(it.category), mk);
+    });
+    return { cost, accum, nbv: cost - accum };
+  }
+
+  // Ending cash = starting cash + manual flow items + cash net income from
+  // the logs − fixed-asset purchases. Depreciation cancels out of cash by
+  // construction (net income includes −dep, operating adds +dep back), so
+  // only the purchase month moves cash — the correct indirect-method result.
   function endingCashBalance(uptoMonth) {
-    const flows = fin.cf
+    const manual = fin.cf
       .filter((c) => c.month <= uptoMonth)
       .reduce((sum, c) => sum + (Number(c.value) || 0), 0);
-    return (Number(fin.settings.startingCash) || 0) + flows;
+    const cashIn =
+      incomes.filter((i) => i.date.slice(0, 7) <= uptoMonth).reduce((s, i) => s + (Number(i.amount) || 0), 0) +
+      fin.income.filter((i) => i.month <= uptoMonth).reduce((s, i) => s + (Number(i.value) || 0), 0);
+    const cashOut = expenses.filter((e) => e.date.slice(0, 7) <= uptoMonth).reduce((s, e) => s + (Number(e.amount) || 0), 0);
+    const purchases = fin.depitems
+      .filter((it) => String(it.date).slice(0, 7) <= uptoMonth)
+      .reduce((s, it) => s + (Number(it.cost) || 0), 0);
+    return (Number(fin.settings.startingCash) || 0) + manual + cashIn - cashOut - purchases;
   }
 
   // Re-render the fin view without destroying an input the user is still
@@ -1017,8 +1026,38 @@
 
   // ---------- BALANCE SHEET ----------
   function renderBalance() {
-    const nw = computeNetWorth();
+    const m = monthStr(viewDate);
+    const nw = computeNetWorth(m);
     const rate = fin.settings.exchangeRate;
+
+    // Fixed assets stay on the books at cost; accumulated depreciation is a
+    // computed contra-asset; only the net book value counts toward totals.
+    const fixedRows = fin.depitems
+      .map((it) => {
+        const years = depYearsById(it.category);
+        const accum = Depreciation.accumulated(it, years, m);
+        return `
+          <div class="fin-row readonly">
+            <span class="f-name" style="flex:1.4;font-size:14px;">${escapeHtml(it.name || "Item")}</span>
+            <span class="fx-col">${currency(it.cost)}</span>
+            <span class="fx-col neg">−${currency(accum)}</span>
+            <span class="row-amount">${currency(Depreciation.netBookValue(it, years, m))}</span>
+          </div>`;
+      })
+      .join("");
+    const fixedSection = fin.depitems.length
+      ? `<div class="fin-section">
+          <div class="fin-section-heading"><span>Fixed Assets (net book value)</span><span class="subtotal">${currency(nw.fixed.nbv)}</span></div>
+          <div class="fin-note">Cost − accumulated depreciation, as of this month. Items are managed in the P&L Depreciation card.</div>
+          ${fixedRows}
+          <div class="fin-row readonly">
+            <span class="f-name" style="flex:1.4;font-size:13px;color:var(--text-dim);">Total · accum. depreciation</span>
+            <span class="fx-col">${currency(nw.fixed.cost)}</span>
+            <span class="fx-col neg">−${currency(nw.fixed.accum)}</span>
+            <span class="row-amount">${currency(nw.fixed.nbv)}</span>
+          </div>
+        </div>`
+      : "";
 
     const assetSections = fin.cats.assetCategories
       .map((cat) => {
@@ -1070,6 +1109,7 @@
       <div class="fin-card" id="assetsCard">
         <div class="fin-card-title">Assets</div>
         ${assetSections || '<div class="fin-note">No assets yet.</div>'}
+        ${fixedSection}
         <div class="fin-section">
           <div class="fin-section-heading"><span>Business — Unanim.eg</span><span class="subtotal">${currency(nw.unanimValue)}</span></div>
           <div class="setting-row">
@@ -1446,6 +1486,27 @@
     const inRange = (c) => (monthly ? c.month === m : c.month.slice(0, 4) === year);
     const filtered = fin.cf.filter(inRange);
 
+    // Indirect method: operating starts from the period's net income (which
+    // already includes depreciation as an expense) and adds the non-cash
+    // depreciation back; fixed-asset purchases hit investing in full.
+    const months = monthly ? [m] : Array.from({ length: 12 }, (_, i) => `${year}-${String(i + 1).padStart(2, "0")}`);
+    const periodIncome = months.reduce((s, k) => s + incomeTotalForMonth(k), 0);
+    const periodSpent = months.reduce((s, k) => s + expenseTotalForMonth(k), 0);
+    const periodDep = months.reduce((s, k) => s + depForMonth(k), 0);
+    const netIncome = periodIncome - periodSpent - periodDep;
+    const purchases = fin.depitems.filter((it) =>
+      monthly ? Depreciation.purchasedInMonth(it, m) : Depreciation.purchasedInYear(it, year)
+    );
+
+    const autoRows = {
+      operating: [
+        { name: "Net Profit / Loss (from P&L)", value: netIncome },
+        { name: "Depreciation add-back (non-cash)", value: periodDep },
+      ],
+      investing: purchases.map((it) => ({ name: `Asset purchase — ${it.name || "item"}`, value: -(Number(it.cost) || 0) })),
+      financing: [],
+    };
+
     const sectionDefs = [
       { key: "operating", label: "Operating Activities" },
       { key: "investing", label: "Investing Activities" },
@@ -1456,8 +1517,19 @@
     const sections = sectionDefs
       .map((def) => {
         const items = filtered.filter((c) => c.section === def.key);
-        const subtotal = items.reduce((s, c) => s + (Number(c.value) || 0), 0);
+        const autos = autoRows[def.key];
+        const subtotal =
+          items.reduce((s, c) => s + (Number(c.value) || 0), 0) + autos.reduce((s, a) => s + a.value, 0);
         netCF += subtotal;
+        const autoHtml = autos
+          .map(
+            (a) => `
+              <div class="fin-row readonly">
+                <span class="f-name" style="flex:1.4;font-size:14px;">${escapeHtml(a.name)}</span>
+                <span class="row-amount ${signClass(a.value)}">${currency(a.value)}</span>
+              </div>`
+          )
+          .join("");
         const rows = items
           .map((c) =>
             finRowHtml(c, {
@@ -1471,6 +1543,7 @@
         return `
           <div class="fin-section">
             <div class="fin-section-heading"><span>${def.label}</span><span class="subtotal ${signClass(subtotal)}">${currency(subtotal)}</span></div>
+            ${autoHtml}
             ${rows}
             <button class="fin-add-btn add-cf" data-section="${def.key}">+ Add ${def.label.split(" ")[0]}</button>
           </div>`;
@@ -1491,6 +1564,7 @@
           <label>Starting Cash (E£)</label>
           <input id="startingCash" type="number" inputmode="decimal" value="${escAttr(fin.settings.startingCash)}" />
         </div>
+        <div class="fin-note">Net P&L, the depreciation add-back, and fixed-asset purchases flow in automatically from your logs; add any other cash movements manually.</div>
         ${sections}
         <div class="fin-totals"><span>Net Cash Flow</span><span class="value ${signClass(netCF)}">${currency(netCF)}</span></div>
         <div class="fin-totals" style="border-top:none;padding-top:4px;"><span>Ending Cash Balance</span><span class="value ${signClass(cash)}">${currency(cash)}</span></div>

@@ -1,6 +1,7 @@
 const ExcelJS = require("exceljs");
 const PDFDocument = require("pdfkit");
 const db = require("./db");
+const Dep = require("./depreciation");
 
 // Shared palette so both exports match the app's look.
 const COLORS = {
@@ -64,30 +65,37 @@ async function buildStatementData(code, month) {
   ];
   const totalIncome = monthIncome.reduce((s, i) => s + (Number(i.value) || 0), 0);
 
-  const unanimValue = (Number(settings.unanimValuation) || 0) * (Number(settings.unanimOwnership) || 0) / 100;
-  const totalAssets = assets.reduce((s, a) => s + assetEffectiveValue(a), 0) + unanimValue;
-  const totalLiabilities = liabilities.reduce((s, l) => s + (Number(l.value) || 0), 0);
-
-  // Straight-line depreciation for this month: cost / (years × 12) for each
-  // item whose useful life covers the month.
+  // Straight-line depreciation via the shared module (same math the app
+  // uses for the P&L, Balance Sheet, and Cash Flow). Computed before asset
+  // totals because net book value counts toward Total Assets.
   const yearsByCat = {};
   depCats.forEach((c) => (yearsByCat[c.id] = Number(c.years) || 0));
-  const monthIdx = (m) => Number(m.slice(0, 4)) * 12 + Number(m.slice(5, 7)) - 1;
-  const cur = monthIdx(month);
   const depRows = [];
+  const fixedRows = [];
   let depreciation = 0;
+  let fixedCost = 0;
+  let fixedAccum = 0;
   depItems.forEach((it) => {
-    const years = yearsByCat[it.category];
-    if (!years) return;
-    const months = years * 12;
-    const start = monthIdx(String(it.date).slice(0, 7));
-    if (cur >= start && cur < start + months) {
-      const dep = (Number(it.cost) || 0) / months;
+    const years = yearsByCat[it.category] || 0;
+    const cat = depCats.find((c) => c.id === it.category);
+    const dep = Dep.forMonth(it, years, month);
+    if (dep > 0) {
       depreciation += dep;
-      const cat = depCats.find((c) => c.id === it.category);
       depRows.push({ name: it.name || (cat ? cat.label : it.category), category: cat ? `${cat.label} · ${years}y` : it.category, value: dep });
     }
+    const accum = Dep.accumulated(it, years, month);
+    fixedCost += Number(it.cost) || 0;
+    fixedAccum += accum;
+    fixedRows.push({ name: it.name || (cat ? cat.label : it.category), cost: Number(it.cost) || 0, accum, nbv: Dep.netBookValue(it, years, month) });
   });
+  const fixedNbv = fixedCost - fixedAccum;
+  const assetPurchases = depItems
+    .filter((it) => Dep.purchasedInMonth(it, month))
+    .map((it) => ({ name: it.name || "item", value: -(Number(it.cost) || 0) }));
+
+  const unanimValue = (Number(settings.unanimValuation) || 0) * (Number(settings.unanimOwnership) || 0) / 100;
+  const totalAssets = assets.reduce((s, a) => s + assetEffectiveValue(a), 0) + unanimValue + fixedNbv;
+  const totalLiabilities = liabilities.reduce((s, l) => s + (Number(l.value) || 0), 0);
 
   const cogsSet = new Set(settings.cogsCategories || []);
   const cogs = Object.entries(expTotals).reduce((s, [id, v]) => s + (cogsSet.has(id) ? v : 0), 0);
@@ -101,7 +109,16 @@ async function buildStatementData(code, month) {
   const tax = ebt > 0 ? ebt * (taxRate / 100) : 0;
 
   const monthCf = cf.filter((c) => c.month === month);
+  // Ending cash mirrors the app: starting cash + manual flows + cash net
+  // income from the logs − fixed-asset purchases (depreciation cancels out).
   const priorFlows = cf.filter((c) => c.month <= month).reduce((s, c) => s + (Number(c.value) || 0), 0);
+  const priorCashIn =
+    income.filter((i) => i.month <= month).reduce((s, i) => s + (Number(i.value) || 0), 0) +
+    incomeLog.filter((i) => i.date.slice(0, 7) <= month).reduce((s, i) => s + (Number(i.amount) || 0), 0);
+  const priorCashOut = expenses.filter((e) => e.date.slice(0, 7) <= month).reduce((s, e) => s + (Number(e.amount) || 0), 0);
+  const priorPurchases = depItems
+    .filter((it) => String(it.date).slice(0, 7) <= month)
+    .reduce((s, it) => s + (Number(it.cost) || 0), 0);
 
   return {
     month,
@@ -121,9 +138,15 @@ async function buildStatementData(code, month) {
     netWorth: totalAssets - totalLiabilities,
     depRows,
     depreciation,
+    fixedRows,
+    fixedCost,
+    fixedAccum,
+    fixedNbv,
+    assetPurchases,
+    netIncome: totalIncome - totalExpense - depreciation,
     ratios: { cogs, grossProfit, opex, ebitda, depreciation, ebit, interest, ebt, taxRate, tax, netAfterTax: ebt - tax },
     monthCf,
-    endingCash: (Number(settings.startingCash) || 0) + priorFlows,
+    endingCash: (Number(settings.startingCash) || 0) + priorFlows + priorCashIn - priorCashOut - priorPurchases,
   };
 }
 
@@ -198,6 +221,14 @@ async function buildXlsx(data) {
     dataRow(bs, [a.name || a.category, a.category, assetEffectiveValue(a)], { stripe: i % 2 === 0 })
   );
   dataRow(bs, ["Unanim.eg equity", "Business", data.unanimValue], { stripe: data.assets.length % 2 === 0 });
+  if (data.fixedRows.length > 0) {
+    headerRow(bs, ["Fixed Asset", "Accum. Depreciation", "Net Book Value"]);
+    data.fixedRows.forEach((f, i) => {
+      const r = dataRow(bs, [`${f.name} (cost ${f.cost.toFixed(2)})`, -f.accum, f.nbv], { stripe: i % 2 === 0 });
+      r.getCell(2).numFmt = MONEY_FMT;
+    });
+    totalRow(bs, "Fixed Assets · Net Book Value", data.fixedNbv, COLORS.income);
+  }
   totalRow(bs, "Total Assets", data.totalAssets, COLORS.income);
   headerRow(bs, ["Liability", "Category", "Value"]);
   data.liabilities.forEach((l, i) => dataRow(bs, [l.name || l.category, l.category, Number(l.value) || 0], { stripe: i % 2 === 0 }));
@@ -239,10 +270,18 @@ async function buildXlsx(data) {
   const cf = wb.addWorksheet("Cash Flow");
   styleSheet(cf);
   titleRow(cf, "Cash Flow Statement", label);
+  const cfAutos = {
+    operating: [
+      { name: "Net Profit / Loss (from P&L)", value: data.netIncome },
+      { name: "Depreciation add-back (non-cash)", value: data.depreciation },
+    ],
+    investing: data.assetPurchases.map((p) => ({ name: `Asset purchase — ${p.name}`, value: p.value })),
+    financing: [],
+  };
   let netCF = 0;
   ["operating", "investing", "financing"].forEach((sec) => {
     headerRow(cf, [sec[0].toUpperCase() + sec.slice(1) + " Activities", "", "Value"]);
-    const items = data.monthCf.filter((c) => c.section === sec);
+    const items = [...cfAutos[sec], ...data.monthCf.filter((c) => c.section === sec)];
     let sub = 0;
     items.forEach((c, i) => {
       sub += Number(c.value) || 0;
@@ -296,6 +335,12 @@ function buildPdf(doc, data) {
   pdfSectionHeader(doc, "Balance Sheet");
   data.assets.forEach((a, i) => pdfLine(doc, `${a.name || a.category}  (${a.category})`, assetEffectiveValue(a), { stripe: i % 2 === 0 }));
   pdfLine(doc, "Unanim.eg equity", data.unanimValue);
+  if (data.fixedRows.length > 0) {
+    data.fixedRows.forEach((f, i) =>
+      pdfLine(doc, `Fixed asset: ${f.name}  (cost ${pdfMoney(f.cost)} − accum. dep ${pdfMoney(f.accum)})`, f.nbv, { stripe: i % 2 === 0 })
+    );
+    pdfLine(doc, "Fixed Assets · Net Book Value", data.fixedNbv, { color: COLORS.income, bold: true });
+  }
   pdfLine(doc, "Total Assets", data.totalAssets, { color: COLORS.income, bold: true });
   data.liabilities.forEach((l, i) => pdfLine(doc, `${l.name || l.category}  (${l.category})`, Number(l.value) || 0, { stripe: i % 2 === 0 }));
   pdfLine(doc, "Total Liabilities", data.totalLiabilities, { color: COLORS.expense, bold: true });
@@ -331,9 +376,17 @@ function buildPdf(doc, data) {
   doc.moveDown(0.8);
 
   pdfSectionHeader(doc, "Cash Flow");
+  const pdfCfAutos = {
+    operating: [
+      { name: "Net Profit / Loss (from P&L)", value: data.netIncome },
+      { name: "Depreciation add-back (non-cash)", value: data.depreciation },
+    ],
+    investing: data.assetPurchases.map((p) => ({ name: `Asset purchase — ${p.name}`, value: p.value })),
+    financing: [],
+  };
   let netCF = 0;
   ["operating", "investing", "financing"].forEach((sec) => {
-    const items = data.monthCf.filter((c) => c.section === sec);
+    const items = [...pdfCfAutos[sec], ...data.monthCf.filter((c) => c.section === sec)];
     let sub = 0;
     items.forEach((c, i) => {
       sub += Number(c.value) || 0;
