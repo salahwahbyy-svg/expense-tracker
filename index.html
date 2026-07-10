@@ -74,10 +74,20 @@
       </div>
     </div>
 
-    <div class="field">
+    <div class="field" id="assetToggleField">
+      <button id="assetToggle" type="button" class="asset-toggle">🏭 Asset — depreciates over time</button>
+    </div>
+
+    <div class="field" id="expenseCategoryField">
       <label>Category</label>
       <div class="category-grid" id="categoryGrid"></div>
       <button id="editCatsBtn" type="button" class="link-btn">✏️ Edit categories</button>
+    </div>
+
+    <div class="field" id="depOptionsField" style="display:none;">
+      <label>Depreciation category · useful life</label>
+      <div class="category-grid" id="depCategoryGrid"></div>
+      <button id="editDepCatsFromSheetBtn" type="button" class="link-btn">✏️ Edit depreciation categories</button>
     </div>
 
     <div class="field">
@@ -86,7 +96,7 @@
     </div>
 
     <div class="field">
-      <label>Date</label>
+      <label id="dateLabel">Date</label>
       <input id="dateInput" type="date" />
     </div>
 

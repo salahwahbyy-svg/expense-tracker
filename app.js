@@ -317,18 +317,26 @@
     monthLabel.textContent = `${MONTH_NAMES[viewDate.getMonth()]} ${viewDate.getFullYear()}`;
   }
 
-  function renderTotal(list) {
-    const total = list.reduce((sum, e) => sum + e.amount, 0);
+  // Virtual category for the Spend page: this month's depreciation charge
+  // shows alongside real spending so the total reflects asset wear too.
+  const DEPRECIATION_CAT = { id: "depreciation", label: "Depreciation", emoji: "🏭", color: "#8f9bb3", budget: 0 };
+
+  function renderTotal(list, dep) {
+    const total = list.reduce((sum, e) => sum + e.amount, 0) + (dep || 0);
     monthTotalEl.textContent = currency(total);
   }
 
-  function renderChart(list) {
+  function renderChart(list, dep) {
     const totalsByCat = {};
     let grandTotal = 0;
     list.forEach((e) => {
       totalsByCat[e.category] = (totalsByCat[e.category] || 0) + e.amount;
       grandTotal += e.amount;
     });
+    if (dep > 0) {
+      totalsByCat[DEPRECIATION_CAT.id] = (totalsByCat[DEPRECIATION_CAT.id] || 0) + dep;
+      grandTotal += dep;
+    }
 
     // Show every category with spend this month, plus budgeted ones even
     // at zero spend so budget progress is visible from day one.
@@ -336,7 +344,8 @@
     cats.forEach((c) => {
       if (Number(c.budget) > 0) ids.add(c.id);
     });
-    const active = [...ids].map(catById)
+    const active = [...ids]
+      .map((id) => (id === DEPRECIATION_CAT.id && !cats.some((c) => c.id === id) ? DEPRECIATION_CAT : catById(id)))
       .sort((a, b) => (totalsByCat[b.id] || 0) - (totalsByCat[a.id] || 0));
 
     if (active.length === 0) {
@@ -476,8 +485,9 @@
 
   function renderExpensesTab() {
     const list = expensesForMonth(viewDate);
-    renderTotal(list);
-    renderChart(list);
+    const dep = depForMonth(monthStr(viewDate));
+    renderTotal(list, dep);
+    renderChart(list, dep);
     renderList(list);
   }
 
@@ -1497,6 +1507,8 @@
   function closeDepCatSheet() {
     depCatSheetOverlay.classList.remove("open");
     renderFin();
+    // Refresh the chip grid if the Add Expense sheet is behind in asset mode.
+    if (assetMode && sheetOverlay.classList.contains("open")) renderDepCategoryGrid();
   }
 
   function renderDepCatRows() {
@@ -1770,6 +1782,52 @@
   const sheetTitle = document.getElementById("sheetTitle");
   const deleteExpenseBtn = document.getElementById("deleteExpenseBtn");
 
+  // "Asset" mode inside the Add Expense sheet: instead of a spend entry the
+  // save creates a fixed asset (depreciation item). The purchase never hits
+  // the spend list — only its monthly depreciation slices do, later.
+  let assetMode = false;
+  let selectedDepCat = null;
+  const assetToggle = document.getElementById("assetToggle");
+  const assetToggleField = document.getElementById("assetToggleField");
+  const depOptionsField = document.getElementById("depOptionsField");
+  const depCategoryGrid = document.getElementById("depCategoryGrid");
+  const dateLabel = document.getElementById("dateLabel");
+
+  function renderDepCategoryGrid() {
+    if (fin.depcats.length === 0) {
+      depCategoryGrid.innerHTML = '<div class="fin-note">Couldn\'t load depreciation categories — check your connection.</div>';
+      return;
+    }
+    if (!selectedDepCat || !fin.depcats.some((c) => c.id === selectedDepCat)) {
+      selectedDepCat = fin.depcats[0].id;
+    }
+    renderChipGrid(
+      depCategoryGrid,
+      fin.depcats.map((c) => ({ id: c.id, label: `${c.label} · ${Number(c.years) || 0}y` })),
+      (opt) => opt.id === selectedDepCat,
+      (opt) => {
+        selectedDepCat = opt.id;
+        renderDepCategoryGrid();
+      }
+    );
+  }
+
+  function updateAssetModeUI() {
+    assetToggle.classList.toggle("active", assetMode);
+    document.getElementById("expenseCategoryField").style.display = assetMode ? "none" : "";
+    depOptionsField.style.display = assetMode ? "" : "none";
+    dateLabel.textContent = assetMode ? "Purchase date" : "Date";
+    noteInput.placeholder = assetMode ? "e.g. MacBook Pro" : "e.g. Coffee with Sam";
+    if (assetMode) renderDepCategoryGrid();
+  }
+
+  assetToggle.addEventListener("click", () => {
+    assetMode = !assetMode;
+    updateAssetModeUI();
+  });
+
+  document.getElementById("editDepCatsFromSheetBtn").addEventListener("click", openDepCatSheet);
+
   function openSheet(expense) {
     editingExpenseId = expense ? expense.id : null;
     selectedCategory = expense ? expense.category : null;
@@ -1778,6 +1836,11 @@
     dateInput.value = expense ? expense.date : todayStr();
     sheetTitle.textContent = expense ? "Edit expense" : "Add expense";
     deleteExpenseBtn.style.display = expense ? "block" : "none";
+    // Existing expenses can't be converted in place — the toggle only shows
+    // when adding something new.
+    assetMode = false;
+    assetToggleField.style.display = expense ? "none" : "";
+    updateAssetModeUI();
     renderCategoryGrid();
     sheetOverlay.classList.add("open");
     if (!expense) setTimeout(() => amountInput.focus(), 200);
@@ -1823,11 +1886,31 @@
       amountInput.focus();
       return;
     }
+    const date = dateInput.value || todayStr();
+    const note = noteInput.value.trim();
+
+    if (assetMode) {
+      if (!selectedDepCat) return;
+      saveBtn.disabled = true;
+      try {
+        await finApi("depitems", { method: "POST", body: JSON.stringify({ category: selectedDepCat, name: note, cost: amount, date }) });
+        await reloadFin("depitems");
+        closeSheet();
+        renderAll();
+        setSyncStatus("online");
+        alert("Added to Fixed Assets on the Balance Sheet.\nDepreciation starts the month after the purchase date and will show as the 🏭 Depreciation category.");
+      } catch {
+        setSyncStatus("offline");
+        alert("Couldn't save — check your connection and try again.");
+      } finally {
+        saveBtn.disabled = false;
+      }
+      return;
+    }
+
     if (!selectedCategory) {
       return;
     }
-    const date = dateInput.value || todayStr();
-    const note = noteInput.value.trim();
 
     saveBtn.disabled = true;
     try {

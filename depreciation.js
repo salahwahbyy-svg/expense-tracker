@@ -20,14 +20,16 @@
     return m ? (Number(cost) || 0) / m : 0;
   }
 
-  // Depreciation expense charged in month `mk` (YYYY-MM). Non-zero only
-  // between the purchase month and the end of the useful life.
+  // Depreciation expense charged in month `mk` (YYYY-MM). The purchase
+  // month itself is charge-free: the first charge lands the month AFTER
+  // purchase, and the schedule runs the full life from there (a 5-year
+  // asset bought July 2026 charges Aug 2026 … Jul 2031).
   function forMonth(item, years, mk) {
     const m = lifeMonths(years);
     if (!m) return 0;
     const start = monthKeyIdx(String(item.date).slice(0, 7));
     const cur = monthKeyIdx(mk);
-    return cur >= start && cur < start + m ? monthlyAmount(item.cost, years) : 0;
+    return cur > start && cur <= start + m ? monthlyAmount(item.cost, years) : 0;
   }
 
   // Depreciation expense for a calendar year (proration handled naturally:
@@ -45,7 +47,8 @@
     const m = lifeMonths(years);
     if (!m) return 0;
     const start = monthKeyIdx(String(item.date).slice(0, 7));
-    const elapsed = Math.min(Math.max(monthKeyIdx(mk) - start + 1, 0), m);
+    // No charge in the purchase month, so months elapsed excludes it.
+    const elapsed = Math.min(Math.max(monthKeyIdx(mk) - start, 0), m);
     return monthlyAmount(item.cost, years) * elapsed;
   }
 
