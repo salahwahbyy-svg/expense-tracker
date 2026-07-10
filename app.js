@@ -889,14 +889,95 @@
     });
   }
 
+  // Exports open in an in-app viewer (back + download buttons) instead of
+  // navigating — in the installed PWA a plain link would replace the app
+  // with the file and leave no way back.
   function exportRowHtml() {
-    const q = `code=${encodeURIComponent(syncCode)}&month=${monthStr(viewDate)}`;
     return `
       <div class="toggle-row">
-        <a class="btn-toggle export-link" href="/api/export/xlsx?${q}">⬇ Excel</a>
-        <a class="btn-toggle export-link" href="/api/export/pdf?${q}">⬇ PDF</a>
+        <button class="btn-toggle export-link" data-export="xlsx">⬇ Excel</button>
+        <button class="btn-toggle export-link" data-export="pdf">⬇ PDF</button>
       </div>`;
   }
+
+  const exportOverlay = document.getElementById("exportOverlay");
+  const exportTitle = document.getElementById("exportTitle");
+  const exportBody = document.getElementById("exportBody");
+  let exportFile = null;
+  let exportBlobUrl = null;
+
+  async function openExportViewer(kind) {
+    const month = monthStr(viewDate);
+    const filename = `Financials_${month}.${kind}`;
+    exportTitle.textContent = filename;
+    exportBody.innerHTML = '<div class="export-loading">Preparing your file…</div>';
+    exportOverlay.classList.add("open");
+    exportFile = null;
+    if (exportBlobUrl) {
+      URL.revokeObjectURL(exportBlobUrl);
+      exportBlobUrl = null;
+    }
+    try {
+      const res = await fetch(`/api/export/${kind}?code=${encodeURIComponent(syncCode)}&month=${month}`);
+      if (!res.ok) throw new Error("export_failed");
+      const blob = await res.blob();
+      const type = kind === "pdf" ? "application/pdf" : "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+      exportFile = new File([blob], filename, { type });
+      exportBlobUrl = URL.createObjectURL(exportFile);
+      if (kind === "pdf") {
+        exportBody.innerHTML = `<iframe class="export-frame" src="${exportBlobUrl}" title="PDF preview"></iframe>`;
+      } else {
+        exportBody.innerHTML = `
+          <div class="export-filecard">
+            <div class="export-fileicon">📊</div>
+            <div class="export-filename">${escapeHtml(filename)}</div>
+            <div class="fin-note">Excel workbook with your Balance Sheet, P&amp;L and Cash Flow for ${escapeHtml(month)}. Tap ⬇ Download to save or share it.</div>
+          </div>`;
+      }
+    } catch {
+      exportBody.innerHTML =
+        '<div class="export-filecard"><div class="export-fileicon">⚠️</div><div class="fin-note">Couldn\'t prepare the file — check your connection and try again.</div></div>';
+    }
+  }
+
+  function closeExportViewer() {
+    exportOverlay.classList.remove("open");
+    exportBody.innerHTML = "";
+    if (exportBlobUrl) {
+      URL.revokeObjectURL(exportBlobUrl);
+      exportBlobUrl = null;
+    }
+    exportFile = null;
+  }
+
+  document.getElementById("exportBackBtn").addEventListener("click", closeExportViewer);
+  document.getElementById("exportDownloadBtn").addEventListener("click", async () => {
+    if (!exportFile) return;
+    // In the installed iPhone app the share sheet is the reliable way to
+    // save a file (Save to Files, AirDrop, Mail…); browsers get a normal
+    // download instead.
+    if (navigator.canShare && navigator.canShare({ files: [exportFile] })) {
+      try {
+        await navigator.share({ files: [exportFile], title: exportFile.name });
+        return;
+      } catch (err) {
+        if (err && err.name === "AbortError") return; // user closed the sheet
+      }
+    }
+    const a = document.createElement("a");
+    a.href = exportBlobUrl;
+    a.download = exportFile.name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  });
+
+  // The export buttons re-render with every fin view, so one delegated
+  // listener covers them all.
+  finView.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-export]");
+    if (btn) openExportViewer(btn.dataset.export);
+  });
 
   // ---------- OVERVIEW ----------
   function renderOverview() {
