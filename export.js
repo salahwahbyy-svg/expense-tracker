@@ -23,15 +23,12 @@ function monthLabel(month) {
 }
 
 function assetEffectiveValue(a) {
-  if (a.category === "Gold" || a.category === "Silver") {
-    return (Number(a.grams) || 0) * (Number(a.price_per_gram) || 0);
-  }
   return Number(a.value) || 0;
 }
 
 // Assemble everything both export formats need for one month.
 async function buildStatementData(code, month) {
-  const [expenses, categories, income, incomeLog, assets, liabilities, cf, settings, depCats, depItems] = await Promise.all([
+  const [expenses, categories, income, incomeLog, assets, liabilities, cf, settings, depCats, depItems, apar] = await Promise.all([
     db.getExpenses(code),
     db.getCategories(code),
     db.getPnlIncome(code),
@@ -42,6 +39,7 @@ async function buildStatementData(code, month) {
     db.getSettings(code),
     db.getDepCats(code),
     db.getDepItems(code),
+    db.getApar(code),
   ]);
 
   const catById = {};
@@ -93,8 +91,16 @@ async function buildStatementData(code, month) {
     .filter((it) => Dep.purchasedInMonth(it, month))
     .map((it) => ({ name: it.name || "item", value: -(Number(it.cost) || 0) }));
 
-  const totalAssets = assets.reduce((s, a) => s + assetEffectiveValue(a), 0) + fixedNbv;
-  const totalLiabilities = liabilities.reduce((s, l) => s + (Number(l.value) || 0), 0);
+  // Open AP/AR as of this month (paid items drop off from their paid month).
+  const isOpenAsOf = (x) => !x.paid_date || String(x.paid_date).slice(0, 7) > month;
+  const arOpen = apar.filter((x) => x.kind === "ar" && isOpenAsOf(x));
+  const apOpen = apar.filter((x) => x.kind === "ap" && isOpenAsOf(x));
+  const arOpenTotal = arOpen.reduce((s, x) => s + (Number(x.amount) || 0), 0);
+  const apOpenTotal = apOpen.reduce((s, x) => s + (Number(x.amount) || 0), 0);
+  const aparPaidThisMonth = apar.filter((x) => x.paid_date && String(x.paid_date).slice(0, 7) === month);
+
+  const totalAssets = assets.reduce((s, a) => s + assetEffectiveValue(a), 0) + fixedNbv + arOpenTotal;
+  const totalLiabilities = liabilities.reduce((s, l) => s + (Number(l.value) || 0), 0) + apOpenTotal;
 
   const cogsSet = new Set(settings.cogsCategories || []);
   const cogs = Object.entries(expTotals).reduce((s, [id, v]) => s + (cogsSet.has(id) ? v : 0), 0);
@@ -118,6 +124,9 @@ async function buildStatementData(code, month) {
   const priorPurchases = depItems
     .filter((it) => String(it.date).slice(0, 7) <= month)
     .reduce((s, it) => s + (Number(it.cost) || 0), 0);
+  const priorAparCash = apar
+    .filter((x) => x.paid_date && String(x.paid_date).slice(0, 7) <= month)
+    .reduce((s, x) => s + (x.kind === "ar" ? 1 : -1) * (Number(x.amount) || 0), 0);
 
   return {
     month,
@@ -141,10 +150,15 @@ async function buildStatementData(code, month) {
     fixedAccum,
     fixedNbv,
     assetPurchases,
+    arOpen,
+    apOpen,
+    arOpenTotal,
+    apOpenTotal,
+    aparPaidThisMonth,
     netIncome: totalIncome - totalExpense - depreciation,
     ratios: { cogs, grossProfit, opex, ebitda, depreciation, ebit, interest, ebt, taxRate, tax, netAfterTax: ebt - tax },
     monthCf,
-    endingCash: (Number(settings.startingCash) || 0) + priorFlows + priorCashIn - priorCashOut - priorPurchases,
+    endingCash: (Number(settings.startingCash) || 0) + priorFlows + priorCashIn - priorCashOut - priorPurchases + priorAparCash,
   };
 }
 
@@ -226,9 +240,19 @@ async function buildXlsx(data) {
     });
     totalRow(bs, "Fixed Assets · Net Book Value", data.fixedNbv, COLORS.income);
   }
+  if (data.arOpen.length > 0) {
+    headerRow(bs, ["Accounts Receivable (open)", "Due", "Value"]);
+    data.arOpen.forEach((x, i) => dataRow(bs, [x.name || "Invoice", x.due_date || "", Number(x.amount) || 0], { stripe: i % 2 === 0 }));
+    totalRow(bs, "Total Accounts Receivable", data.arOpenTotal, COLORS.income);
+  }
   totalRow(bs, "Total Assets", data.totalAssets, COLORS.income);
   headerRow(bs, ["Liability", "Category", "Value"]);
   data.liabilities.forEach((l, i) => dataRow(bs, [l.name || l.category, l.category, Number(l.value) || 0], { stripe: i % 2 === 0 }));
+  if (data.apOpen.length > 0) {
+    headerRow(bs, ["Accounts Payable (open)", "Due", "Value"]);
+    data.apOpen.forEach((x, i) => dataRow(bs, [x.name || "Bill", x.due_date || "", Number(x.amount) || 0], { stripe: i % 2 === 0 }));
+    totalRow(bs, "Total Accounts Payable", data.apOpenTotal, COLORS.expense);
+  }
   totalRow(bs, "Total Liabilities", data.totalLiabilities, COLORS.expense);
   totalRow(bs, "NET WORTH", data.netWorth, COLORS.accent);
 
@@ -271,6 +295,10 @@ async function buildXlsx(data) {
     operating: [
       { name: "Net Profit / Loss (from P&L)", value: data.netIncome },
       { name: "Depreciation add-back (non-cash)", value: data.depreciation },
+      ...data.aparPaidThisMonth.map((x) => ({
+        name: x.kind === "ar" ? `AR collected — ${x.name || "Invoice"}` : `AP paid — ${x.name || "Bill"}`,
+        value: (x.kind === "ar" ? 1 : -1) * (Number(x.amount) || 0),
+      })),
     ],
     investing: data.assetPurchases.map((p) => ({ name: `Asset purchase — ${p.name}`, value: p.value })),
     financing: [],
@@ -337,8 +365,12 @@ function buildPdf(doc, data) {
     );
     pdfLine(doc, "Fixed Assets · Net Book Value", data.fixedNbv, { color: COLORS.income, bold: true });
   }
+  data.arOpen.forEach((x, i) => pdfLine(doc, `Accounts receivable: ${x.name || "Invoice"}  (due ${x.due_date || "—"})`, Number(x.amount) || 0, { stripe: i % 2 === 0 }));
+  if (data.arOpen.length > 0) pdfLine(doc, "Total Accounts Receivable", data.arOpenTotal, { color: COLORS.income, bold: true });
   pdfLine(doc, "Total Assets", data.totalAssets, { color: COLORS.income, bold: true });
   data.liabilities.forEach((l, i) => pdfLine(doc, `${l.name || l.category}  (${l.category})`, Number(l.value) || 0, { stripe: i % 2 === 0 }));
+  data.apOpen.forEach((x, i) => pdfLine(doc, `Accounts payable: ${x.name || "Bill"}  (due ${x.due_date || "—"})`, Number(x.amount) || 0, { stripe: i % 2 === 0 }));
+  if (data.apOpen.length > 0) pdfLine(doc, "Total Accounts Payable", data.apOpenTotal, { color: COLORS.expense, bold: true });
   pdfLine(doc, "Total Liabilities", data.totalLiabilities, { color: COLORS.expense, bold: true });
   pdfLine(doc, "NET WORTH", data.netWorth, { color: COLORS.accent, bold: true });
   doc.moveDown(0.8);
@@ -376,6 +408,10 @@ function buildPdf(doc, data) {
     operating: [
       { name: "Net Profit / Loss (from P&L)", value: data.netIncome },
       { name: "Depreciation add-back (non-cash)", value: data.depreciation },
+      ...data.aparPaidThisMonth.map((x) => ({
+        name: x.kind === "ar" ? `AR collected — ${x.name || "Invoice"}` : `AP paid — ${x.name || "Bill"}`,
+        value: (x.kind === "ar" ? 1 : -1) * (Number(x.amount) || 0),
+      })),
     ],
     investing: data.assetPurchases.map((p) => ({ name: `Asset purchase — ${p.name}`, value: p.value })),
     financing: [],

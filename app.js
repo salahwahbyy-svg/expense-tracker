@@ -204,19 +204,19 @@
   let selectedCategory = null;
   let activeTab = "expenses";
 
-  const METALS = new Set(["Gold", "Silver"]);
-  const isMetal = (cat) => METALS.has(cat);
-
   const fin = {
     loaded: false,
     failed: false,
     settings: { exchangeRate: 47.5, startingCash: 0, taxRate: 0, cogsCategories: [] },
     cats: { assetCategories: [], liabilityCategories: [], incomeCategories: [], cfSections: [] },
+    assetCats: [],
+    liabCats: [],
     assets: [],
     liabilities: [],
     income: [],
     cf: [],
     history: [],
+    apar: [],
     depcats: [],
     depitems: [],
     pnlView: "monthly",
@@ -614,24 +614,30 @@
   async function loadFin() {
     if (!syncCode) return;
     try {
-      const [cats, settings, assets, liabilities, income, cf, history, depcats, depitems] = await Promise.all([
+      const [cats, settings, assetCats, liabCats, assets, liabilities, income, cf, history, apar, depcats, depitems] = await Promise.all([
         finApi("categories"),
         finApi("settings"),
+        finApi("bscats?kind=asset"),
+        finApi("bscats?kind=liability"),
         finApi("assets"),
         finApi("liabilities"),
         finApi("income"),
         finApi("cashflow"),
         finApi("networth"),
+        finApi("apar"),
         finApi("depcats"),
         finApi("depitems"),
       ]);
       fin.cats = cats;
       fin.settings = settings;
+      fin.assetCats = assetCats;
+      fin.liabCats = liabCats;
       fin.assets = assets;
       fin.liabilities = liabilities;
       fin.income = income;
       fin.cf = cf;
       fin.history = history;
+      fin.apar = apar;
       fin.depcats = depcats;
       fin.depitems = depitems;
       fin.loaded = true;
@@ -648,6 +654,7 @@
       else if (name === "liabilities") fin.liabilities = data;
       else if (name === "income") fin.income = data;
       else if (name === "cashflow") fin.cf = data;
+      else if (name === "apar") fin.apar = data;
       else if (name === "depcats") fin.depcats = data;
       else if (name === "depitems") fin.depitems = data;
     } catch {
@@ -655,19 +662,41 @@
     }
   }
 
-  function assetEffectiveValue(a) {
-    if (isMetal(a.category)) {
-      return (Number(a.grams) || 0) * (Number(a.price_per_gram) || 0);
+  async function reloadBsCats(kind) {
+    try {
+      const data = await finApi(`bscats?kind=${kind}`);
+      if (kind === "asset") fin.assetCats = data;
+      else fin.liabCats = data;
+    } catch {
+      /* keep stale data */
     }
+  }
+
+  function assetEffectiveValue(a) {
     return Number(a.value) || 0;
+  }
+
+  // Open AP/AR as of a month: paid items drop off from their paid month.
+  // AR is a current asset, AP a current liability.
+  function aparOpenTotals(mk) {
+    let ar = 0;
+    let ap = 0;
+    fin.apar.forEach((x) => {
+      const paid = x.paid_date ? String(x.paid_date).slice(0, 7) : null;
+      if (paid && paid <= mk) return;
+      if (x.kind === "ar") ar += Number(x.amount) || 0;
+      else ap += Number(x.amount) || 0;
+    });
+    return { ar, ap };
   }
 
   function computeNetWorth(mk) {
     const m = mk || monthStr(viewDate);
     const fixed = fixedAssetTotals(m);
-    const totalAssets = fin.assets.reduce((sum, a) => sum + assetEffectiveValue(a), 0) + fixed.nbv;
-    const totalLiabilities = fin.liabilities.reduce((sum, l) => sum + (Number(l.value) || 0), 0);
-    return { totalAssets, totalLiabilities, fixed, netWorth: totalAssets - totalLiabilities };
+    const apar = aparOpenTotals(m);
+    const totalAssets = fin.assets.reduce((sum, a) => sum + assetEffectiveValue(a), 0) + fixed.nbv + apar.ar;
+    const totalLiabilities = fin.liabilities.reduce((sum, l) => sum + (Number(l.value) || 0), 0) + apar.ap;
+    return { totalAssets, totalLiabilities, fixed, apar, netWorth: totalAssets - totalLiabilities };
   }
 
   // Expense log rolled up by month — this is what feeds the P&L expense side.
@@ -739,7 +768,10 @@
     const purchases = fin.depitems
       .filter((it) => String(it.date).slice(0, 7) <= uptoMonth)
       .reduce((s, it) => s + (Number(it.cost) || 0), 0);
-    return (Number(fin.settings.startingCash) || 0) + manual + cashIn - cashOut - purchases;
+    const aparCash = fin.apar
+      .filter((x) => x.paid_date && String(x.paid_date).slice(0, 7) <= uptoMonth)
+      .reduce((s, x) => s + (x.kind === "ar" ? 1 : -1) * (Number(x.amount) || 0), 0);
+    return (Number(fin.settings.startingCash) || 0) + manual + cashIn - cashOut - purchases + aparCash;
   }
 
   // Re-render the fin view without destroying an input the user is still
@@ -1148,64 +1180,82 @@
         </div>`
       : "";
 
-    const assetSections = fin.cats.assetCategories
+    // User-editable categories; items reference the category id (the label
+    // can be renamed freely).
+    const bsSection = (cat, items, subtotal) => {
+      const rows = items
+        .map((it) =>
+          finRowHtml(it, {
+            fields: [
+              { key: "name", cls: "f-name", placeholder: "Name" },
+              { key: "value", cls: "f-num", num: true, placeholder: "Value" },
+            ],
+          })
+        )
+        .join("");
+      return `<div class="fin-section"><div class="fin-section-heading"><span>${escapeHtml(cat.label)}</span><span class="subtotal">${currency(subtotal)}</span></div>${rows}</div>`;
+    };
+
+    const assetSections = fin.assetCats
       .map((cat) => {
-        const items = fin.assets.filter((a) => a.category === cat);
+        const items = fin.assets.filter((a) => a.category === cat.id);
         if (items.length === 0) return "";
-        const subtotal = items.reduce((s, a) => s + assetEffectiveValue(a), 0);
-        const rows = items
-          .map((a) =>
-            finRowHtml(a, {
-              fields: isMetal(cat)
-                ? [
-                    { key: "name", cls: "f-name", placeholder: "Name" },
-                    { key: "grams", cls: "f-num", num: true, placeholder: "Grams" },
-                    { key: "price_per_gram", cls: "f-num", num: true, placeholder: "E£/g" },
-                    { type: "label", value: assetEffectiveValue(a) },
-                  ]
-                : [
-                    { key: "name", cls: "f-name", placeholder: "Name" },
-                    { key: "value", cls: "f-num", num: true, placeholder: "Value" },
-                  ],
-            })
-          )
-          .join("");
-        return `<div class="fin-section"><div class="fin-section-heading"><span>${escapeHtml(cat)}</span><span class="subtotal">${currency(subtotal)}</span></div>${rows}</div>`;
+        return bsSection(cat, items, items.reduce((s, a) => s + assetEffectiveValue(a), 0));
       })
       .join("");
 
-    const liabSections = fin.cats.liabilityCategories
+    const liabSections = fin.liabCats
       .map((cat) => {
-        const items = fin.liabilities.filter((l) => l.category === cat);
+        const items = fin.liabilities.filter((l) => l.category === cat.id);
         if (items.length === 0) return "";
-        const subtotal = items.reduce((s, l) => s + (Number(l.value) || 0), 0);
-        const rows = items
-          .map((l) =>
-            finRowHtml(l, {
-              fields: [
-                { key: "name", cls: "f-name", placeholder: "Name" },
-                { key: "value", cls: "f-num", num: true, placeholder: "Value" },
-              ],
-            })
-          )
-          .join("");
-        return `<div class="fin-section"><div class="fin-section-heading"><span>${escapeHtml(cat)}</span><span class="subtotal">${currency(subtotal)}</span></div>${rows}</div>`;
+        return bsSection(cat, items, items.reduce((s, l) => s + (Number(l.value) || 0), 0));
       })
       .join("");
+
+    // Open AP/AR (managed on the Cash flow tab) shown as current items.
+    const isOpenAsOf = (x) => !x.paid_date || String(x.paid_date).slice(0, 7) > m;
+    const aparRows = (kind, fallback) =>
+      fin.apar
+        .filter((x) => x.kind === kind && isOpenAsOf(x))
+        .map(
+          (x) => `
+          <div class="fin-row readonly">
+            <span class="f-name" style="flex:1.4;font-size:14px;">${escapeHtml(x.name || fallback)}</span>
+            <span class="fx-col">due ${escapeHtml(x.due_date || "—")}</span>
+            <span class="row-amount">${currency(x.amount)}</span>
+          </div>`
+        )
+        .join("");
+    const arSection = nw.apar.ar
+      ? `<div class="fin-section">
+          <div class="fin-section-heading"><span>Accounts Receivable (current asset)</span><span class="subtotal">${currency(nw.apar.ar)}</span></div>
+          <div class="fin-note">Open invoices owed to you — manage them on the Cash tab.</div>
+          ${aparRows("ar", "Invoice")}
+        </div>`
+      : "";
+    const apSection = nw.apar.ap
+      ? `<div class="fin-section">
+          <div class="fin-section-heading"><span>Accounts Payable (current liability)</span><span class="subtotal">${currency(nw.apar.ap)}</span></div>
+          <div class="fin-note">Open bills you owe — manage them on the Cash tab.</div>
+          ${aparRows("ap", "Bill")}
+        </div>`
+      : "";
 
     return `
       ${exportRowHtml()}
       <div class="fin-card" id="assetsCard">
-        <div class="fin-card-title">Assets</div>
+        <div class="fin-card-title">Assets <button class="snapshot-btn" id="editAssetCatsBtn">✏️ Categories</button></div>
         ${assetSections || '<div class="fin-note">No assets yet.</div>'}
         ${fixedSection}
+        ${arSection}
         <button class="fin-add-btn" id="addAssetBtn">+ Add Asset</button>
         <div class="fin-totals"><span>Total Assets</span><span class="value">${currency(nw.totalAssets)}</span></div>
       </div>
 
       <div class="fin-card" id="liabCard">
-        <div class="fin-card-title">Liabilities</div>
+        <div class="fin-card-title">Liabilities <button class="snapshot-btn" id="editLiabCatsBtn">✏️ Categories</button></div>
         ${liabSections || '<div class="fin-note">No liabilities yet.</div>'}
+        ${apSection}
         <button class="fin-add-btn" id="addLiabilityBtn">+ Add Liability</button>
         <div class="fin-totals"><span>Total Liabilities</span><span class="value">${currency(nw.totalLiabilities)}</span></div>
       </div>
@@ -1220,26 +1270,22 @@
   }
 
   function wireBalance() {
-    wireFinRows(document.getElementById("assetsCard"), "assets", ["value", "grams", "price_per_gram"], "assets");
+    wireFinRows(document.getElementById("assetsCard"), "assets", ["value"], "assets");
     wireFinRows(document.getElementById("liabCard"), "liabilities", ["value"], "liabilities");
+
+    document.getElementById("editAssetCatsBtn").addEventListener("click", () => openBsCatSheet("asset"));
+    document.getElementById("editLiabCatsBtn").addEventListener("click", () => openBsCatSheet("liability"));
 
     document.getElementById("addAssetBtn").addEventListener("click", () => {
       openFinSheet({
         title: "Add asset",
-        chips: { label: "Category", options: fin.cats.assetCategories },
-        fields: (cat) =>
-          isMetal(cat)
-            ? [
-                { key: "name", label: "Name", placeholder: "e.g. 21k gold" },
-                { key: "grams", label: "Grams", type: "num", placeholder: "0" },
-                { key: "price_per_gram", label: "Price per gram (E£)", type: "num", placeholder: "0" },
-              ]
-            : [
-                { key: "name", label: "Name", placeholder: "e.g. CIB account" },
-                { key: "value", label: "Value (E£)", type: "num", placeholder: "0" },
-              ],
+        chips: { label: "Category", options: fin.assetCats.map((c) => ({ id: c.id, label: c.label })) },
+        fields: [
+          { key: "name", label: "Name", placeholder: "e.g. CIB account" },
+          { key: "value", label: "Value (E£)", type: "num", placeholder: "0" },
+        ],
         onSave: async (cat, values) => {
-          await finApi("assets", { method: "POST", body: JSON.stringify({ category: cat, ...values }) });
+          await finApi("assets", { method: "POST", body: JSON.stringify({ category: cat.id, ...values }) });
           await reloadFin("assets");
         },
       });
@@ -1248,13 +1294,13 @@
     document.getElementById("addLiabilityBtn").addEventListener("click", () => {
       openFinSheet({
         title: "Add liability",
-        chips: { label: "Category", options: fin.cats.liabilityCategories },
+        chips: { label: "Category", options: fin.liabCats.map((c) => ({ id: c.id, label: c.label })) },
         fields: [
           { key: "name", label: "Name", placeholder: "e.g. Car loan" },
           { key: "value", label: "Value (E£)", type: "num", placeholder: "0" },
         ],
         onSave: async (cat, values) => {
-          await finApi("liabilities", { method: "POST", body: JSON.stringify({ category: cat, ...values }) });
+          await finApi("liabilities", { method: "POST", body: JSON.stringify({ category: cat.id, ...values }) });
           await reloadFin("liabilities");
         },
       });
@@ -1550,6 +1596,87 @@
     if (e.target === depCatSheetOverlay) closeDepCatSheet();
   });
 
+  // ---------- balance-sheet category editor (assets & liabilities) ----------
+  const bsCatSheetOverlay = document.getElementById("bsCatSheetOverlay");
+  const bsCatListEl = document.getElementById("bsCatList");
+  const bsCatTitle = document.getElementById("bsCatTitle");
+  let bsCatKind = "asset";
+
+  function bsCatsOfKind() {
+    return bsCatKind === "asset" ? fin.assetCats : fin.liabCats;
+  }
+
+  function bsItemsOfKind() {
+    return bsCatKind === "asset" ? fin.assets : fin.liabilities;
+  }
+
+  function openBsCatSheet(kind) {
+    bsCatKind = kind;
+    bsCatTitle.textContent = kind === "asset" ? "Asset categories" : "Liability categories";
+    renderBsCatRows();
+    bsCatSheetOverlay.classList.add("open");
+  }
+
+  function closeBsCatSheet() {
+    bsCatSheetOverlay.classList.remove("open");
+    renderFin();
+  }
+
+  function renderBsCatRows() {
+    bsCatListEl.innerHTML = "";
+    bsCatsOfKind().forEach((cat) => {
+      const row = document.createElement("div");
+      row.className = "cat-row";
+      row.innerHTML = `
+        <input class="cat-label" value="${escAttr(cat.label)}" maxlength="24" aria-label="Name" ${cat.id === "Other" ? "disabled" : ""} />
+        ${cat.id === "Other" ? '<span class="cat-lock" title="Permanent">🔒</span>' : '<button class="row-del">✕</button>'}
+      `;
+
+      row.querySelector(".cat-label").addEventListener("change", async (e) => {
+        const label = e.target.value.trim();
+        if (!label) return renderBsCatRows();
+        try {
+          await finApi(`bscats/${encodeURIComponent(cat.id)}?kind=${bsCatKind}`, { method: "PUT", body: JSON.stringify({ label }) });
+          await reloadBsCats(bsCatKind);
+        } catch {
+          alert("Couldn't save — check your connection.");
+        }
+        renderBsCatRows();
+      });
+
+      const del = row.querySelector(".row-del");
+      if (del) {
+        del.addEventListener("click", async () => {
+          const count = bsItemsOfKind().filter((it) => it.category === cat.id).length;
+          if (!confirm(`Delete "${cat.label}"?${count ? `\n${count} item(s) in it will move to Other.` : ""}`)) return;
+          try {
+            await finApi(`bscats/${encodeURIComponent(cat.id)}?kind=${bsCatKind}`, { method: "DELETE" });
+            await Promise.all([reloadBsCats(bsCatKind), reloadFin(bsCatKind === "asset" ? "assets" : "liabilities")]);
+          } catch {
+            alert("Couldn't delete — check your connection.");
+          }
+          renderBsCatRows();
+        });
+      }
+
+      bsCatListEl.appendChild(row);
+    });
+  }
+
+  document.getElementById("addBsCatBtn").addEventListener("click", async () => {
+    try {
+      await finApi(`bscats?kind=${bsCatKind}`, { method: "POST", body: JSON.stringify({ label: "New category" }) });
+      await reloadBsCats(bsCatKind);
+    } catch {
+      alert("Couldn't add — check your connection.");
+    }
+    renderBsCatRows();
+  });
+  document.getElementById("bsCatCloseBtn").addEventListener("click", closeBsCatSheet);
+  bsCatSheetOverlay.addEventListener("click", (e) => {
+    if (e.target === bsCatSheetOverlay) closeBsCatSheet();
+  });
+
   // ---------- CASH FLOW ----------
   function renderCashflow() {
     const m = monthStr(viewDate);
@@ -1570,10 +1697,21 @@
       monthly ? Depreciation.purchasedInMonth(it, m) : Depreciation.purchasedInYear(it, year)
     );
 
+    // AR collected / AP paid in the period are real cash movements.
+    const aparPaid = fin.apar.filter((x) => {
+      if (!x.paid_date) return false;
+      const pm = String(x.paid_date).slice(0, 7);
+      return monthly ? pm === m : pm.slice(0, 4) === year;
+    });
+
     const autoRows = {
       operating: [
         { name: "Net Profit / Loss (from P&L)", value: netIncome },
         { name: "Depreciation add-back (non-cash)", value: periodDep },
+        ...aparPaid.map((x) => ({
+          name: x.kind === "ar" ? `AR collected — ${x.name || "Invoice"}` : `AP paid — ${x.name || "Bill"}`,
+          value: (x.kind === "ar" ? 1 : -1) * (Number(x.amount) || 0),
+        })),
       ],
       investing: purchases.map((it) => ({ name: `Asset purchase — ${it.name || "item"}`, value: -(Number(it.cost) || 0) })),
       financing: [],
@@ -1624,12 +1762,60 @@
 
     const cash = endingCashBalance(m);
 
+    // AP/AR management: open items are editable with a "mark paid" action;
+    // items paid in the visible period can be reopened.
+    const aparOpenRows = (kind, fallback) =>
+      fin.apar
+        .filter((x) => x.kind === kind && !x.paid_date)
+        .map(
+          (x) => `
+          <div class="fin-row" data-id="${escAttr(x.id)}">
+            <input class="f-name" data-field="name" value="${escAttr(x.name ?? "")}" placeholder="${fallback}" />
+            <input class="f-num" data-field="amount" type="number" inputmode="decimal" step="0.01" value="${escAttr(x.amount ?? "")}" placeholder="Amount" />
+            <input class="f-date" data-field="due_date" type="date" value="${escAttr(x.due_date ?? "")}" />
+            <button class="apar-paid" data-id="${escAttr(x.id)}" title="Mark paid">✓</button>
+            <button class="row-del">✕</button>
+          </div>`
+        )
+        .join("");
+    const aparPaidRows = aparPaid
+      .map(
+        (x) => `
+        <div class="fin-row readonly">
+          <span class="f-name" style="flex:1.4;font-size:14px;">${escapeHtml(x.name || (x.kind === "ar" ? "Invoice" : "Bill"))} <span style="color:var(--text-dim);font-size:12px;">paid ${escapeHtml(x.paid_date)}</span></span>
+          <span class="row-amount ${x.kind === "ar" ? "pos" : "neg"}">${x.kind === "ar" ? "+" : "−"}${currency(x.amount)}</span>
+          <button class="apar-reopen" data-id="${escAttr(x.id)}" title="Reopen">↩</button>
+        </div>`
+      )
+      .join("");
+    const arOpenTotal = fin.apar.filter((x) => x.kind === "ar" && !x.paid_date).reduce((s, x) => s + (Number(x.amount) || 0), 0);
+    const apOpenTotal = fin.apar.filter((x) => x.kind === "ap" && !x.paid_date).reduce((s, x) => s + (Number(x.amount) || 0), 0);
+
+    const aparCard = `
+      <div class="fin-card" id="aparCard">
+        <div class="fin-card-title">Receivables &amp; Payables</div>
+        <div class="fin-note">Open items sit on the Balance Sheet (AR = current asset, AP = current liability). Tap ✓ when one is paid — the cash moves here in that month.</div>
+        <div class="fin-section">
+          <div class="fin-section-heading"><span>Accounts Receivable — money coming in</span><span class="subtotal pos">${currency(arOpenTotal)}</span></div>
+          ${aparOpenRows("ar", "e.g. Client invoice")}
+          <button class="fin-add-btn" id="addArBtn">+ Add Receivable (AR)</button>
+        </div>
+        <div class="fin-section">
+          <div class="fin-section-heading"><span>Accounts Payable — money going out</span><span class="subtotal neg">${currency(apOpenTotal)}</span></div>
+          ${aparOpenRows("ap", "e.g. Supplier bill")}
+          <button class="fin-add-btn" id="addApBtn">+ Add Payable (AP)</button>
+        </div>
+        ${aparPaidRows ? `<div class="fin-section"><div class="fin-section-heading"><span>Paid this period</span></div>${aparPaidRows}</div>` : ""}
+      </div>`;
+
     return `
       ${exportRowHtml()}
       <div class="toggle-row">
         <button class="btn-toggle ${monthly ? "active" : ""}" id="cfMonthly">Monthly</button>
         <button class="btn-toggle ${!monthly ? "active" : ""}" id="cfYearly">Yearly</button>
       </div>
+
+      ${aparCard}
 
       <div class="fin-card" id="cfCard">
         <div class="setting-row">
@@ -1648,6 +1834,40 @@
     document.getElementById("cfMonthly").addEventListener("click", () => { fin.cfView = "monthly"; renderFin(); });
     document.getElementById("cfYearly").addEventListener("click", () => { fin.cfView = "yearly"; renderFin(); });
     wireFinRows(document.getElementById("cfCard"), "cashflow", ["value"], "cashflow");
+    wireFinRows(document.getElementById("aparCard"), "apar", ["amount"], "apar");
+
+    const aparAction = (id, body) => async () => {
+      try {
+        await finApi(`apar/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify(body) });
+        await reloadFin("apar");
+      } catch {
+        alert("Couldn't save — check your connection.");
+      }
+      renderFin();
+    };
+    document.querySelectorAll("#aparCard .apar-paid").forEach((btn) => {
+      btn.addEventListener("click", aparAction(btn.dataset.id, { paid_date: todayStr() }));
+    });
+    document.querySelectorAll("#aparCard .apar-reopen").forEach((btn) => {
+      btn.addEventListener("click", aparAction(btn.dataset.id, { paid_date: null }));
+    });
+
+    const addApar = (kind) => () => {
+      openFinSheet({
+        title: kind === "ar" ? "Add receivable (AR)" : "Add payable (AP)",
+        fields: [
+          { key: "name", label: "Description", placeholder: kind === "ar" ? "e.g. Client invoice" : "e.g. Supplier bill" },
+          { key: "amount", label: "Amount (E£)", type: "num", placeholder: "0" },
+          { key: "due_date", label: "Due date", type: "date", value: todayStr() },
+        ],
+        onSave: async (_chip, values) => {
+          await finApi("apar", { method: "POST", body: JSON.stringify({ kind, ...values }) });
+          await reloadFin("apar");
+        },
+      });
+    };
+    document.getElementById("addArBtn").addEventListener("click", addApar("ar"));
+    document.getElementById("addApBtn").addEventListener("click", addApar("ap"));
 
     document.getElementById("startingCash").addEventListener("change", (e) => {
       saveFinSettings({ startingCash: Number(e.target.value) || 0 });

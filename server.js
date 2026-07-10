@@ -327,13 +327,24 @@ function pick(body, partial, spec) {
   return out;
 }
 
+// Balance-sheet categories are user-defined (bs_categories table); the
+// server only checks the shape of the id here.
+function sanitizeBsItem(b, partial) {
+  const out = pick(b, partial, { name: "name", value: "num" });
+  if (!out) return null;
+  if (!partial || "category" in b) {
+    if (typeof b.category !== "string" || !b.category.trim() || b.category.length > 40) return null;
+    out.category = b.category.trim();
+  }
+  return out;
+}
+
 finCrud("assets", {
   get: db.getAssets,
   add: db.addAsset,
   update: db.updateAsset,
   remove: db.deleteAsset,
-  sanitize: (b, partial) =>
-    pick(b, partial, { category: ASSET_CATEGORIES, name: "name", value: "num", grams: "num", price_per_gram: "num" }),
+  sanitize: sanitizeBsItem,
 });
 
 finCrud("liabilities", {
@@ -341,7 +352,101 @@ finCrud("liabilities", {
   add: db.addLiability,
   update: db.updateLiability,
   remove: db.deleteLiability,
-  sanitize: (b, partial) => pick(b, partial, { category: LIABILITY_CATEGORIES, name: "name", value: "num" }),
+  sanitize: sanitizeBsItem,
+});
+
+// ---------- Balance-sheet category management ----------
+
+const BS_KINDS = ["asset", "liability"];
+
+function bsKind(req) {
+  const kind = ((req.query.kind || (req.body && req.body.kind) || "") + "").toLowerCase();
+  return BS_KINDS.includes(kind) ? kind : null;
+}
+
+app.get("/api/fin/bscats", requireCode, async (req, res, next) => {
+  const kind = bsKind(req);
+  if (!kind) return res.status(400).json({ error: "invalid_kind" });
+  try {
+    res.json(await db.getBsCats(req.syncCode, kind));
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.post("/api/fin/bscats", requireCode, async (req, res, next) => {
+  const kind = bsKind(req);
+  if (!kind) return res.status(400).json({ error: "invalid_kind" });
+  const b = req.body || {};
+  if (typeof b.label !== "string" || !b.label.trim()) return res.status(400).json({ error: "invalid_label" });
+  const label = b.label.trim().slice(0, 24);
+  try {
+    const existing = new Set((await db.getBsCats(req.syncCode, kind)).map((c) => c.id));
+    let id = label;
+    let n = 2;
+    while (existing.has(id)) id = `${label} ${n++}`;
+    res.status(201).json(await db.addBsCat(req.syncCode, kind, { id, label }));
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.put("/api/fin/bscats/:id", requireCode, async (req, res, next) => {
+  const kind = bsKind(req);
+  if (!kind) return res.status(400).json({ error: "invalid_kind" });
+  if (req.params.id === "Other") return res.status(400).json({ error: "cannot_edit_other" });
+  const b = req.body || {};
+  if (typeof b.label !== "string" || !b.label.trim()) return res.status(400).json({ error: "invalid_label" });
+  try {
+    const ok = await db.updateBsCat(req.syncCode, kind, req.params.id, b.label.trim().slice(0, 24));
+    if (!ok) return res.status(404).json({ error: "not_found" });
+    res.json({ id: req.params.id, label: b.label.trim().slice(0, 24) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.delete("/api/fin/bscats/:id", requireCode, async (req, res, next) => {
+  const kind = bsKind(req);
+  if (!kind) return res.status(400).json({ error: "invalid_kind" });
+  if (req.params.id === "Other") return res.status(400).json({ error: "cannot_delete_other" });
+  try {
+    const moved = await db.deleteBsCat(req.syncCode, kind, req.params.id);
+    if (moved === null) return res.status(404).json({ error: "not_found" });
+    res.json({ moved });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ---------- Accounts payable / receivable ----------
+// Open items sit on the Balance Sheet (AR = current asset, AP = current
+// liability); setting paid_date moves the cash on the Cash Flow statement.
+
+finCrud("apar", {
+  get: db.getApar,
+  add: db.addApar,
+  update: db.updateApar,
+  remove: db.deleteApar,
+  sanitize: (b, partial) => {
+    const out = pick(b, partial, { name: "name", amount: "num" });
+    if (!out) return null;
+    if (!partial) {
+      if (b.kind !== "ap" && b.kind !== "ar") return null;
+      out.kind = b.kind;
+    }
+    if (!partial || "due_date" in b) {
+      if (typeof b.due_date !== "string" || !DATE_RE.test(b.due_date)) {
+        if (partial) return null;
+        out.due_date = new Date().toISOString().slice(0, 10);
+      } else out.due_date = b.due_date;
+    }
+    if (partial && "paid_date" in b) {
+      if (b.paid_date !== null && (typeof b.paid_date !== "string" || !DATE_RE.test(b.paid_date))) return null;
+      out.paid_date = b.paid_date;
+    }
+    return out;
+  },
 });
 
 finCrud("income", {

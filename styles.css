@@ -769,6 +769,24 @@ html, body {
   color: var(--text);
 }
 
+.fin-row .apar-paid,
+.fin-row .apar-reopen {
+  flex-shrink: 0;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: rgba(108, 240, 184, 0.12);
+  color: var(--entertainment);
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.fin-row .apar-reopen {
+  background: var(--surface-2);
+  color: var(--text-dim);
+}
+
 .fin-row .row-del {
   background: none;
   border: none;

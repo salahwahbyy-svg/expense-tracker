@@ -97,6 +97,24 @@ const ready = client.batch(
       starting_cash REAL DEFAULT 0
     )`,
     `CREATE INDEX IF NOT EXISTS idx_expenses_sync_code ON expenses (sync_code)`,
+    `CREATE TABLE IF NOT EXISTS bs_categories (
+      sync_code TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      id TEXT NOT NULL,
+      label TEXT NOT NULL,
+      sort INTEGER DEFAULT 0,
+      PRIMARY KEY (sync_code, kind, id)
+    )`,
+    `CREATE TABLE IF NOT EXISTS ap_ar (
+      id TEXT PRIMARY KEY,
+      sync_code TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      name TEXT DEFAULT '',
+      amount REAL DEFAULT 0,
+      due_date TEXT,
+      paid_date TEXT
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_ap_ar_sync_code ON ap_ar (sync_code)`,
     `CREATE INDEX IF NOT EXISTS idx_incomes_sync_code ON incomes (sync_code)`,
     `CREATE INDEX IF NOT EXISTS idx_dep_items_sync_code ON dep_items (sync_code)`,
     `CREATE INDEX IF NOT EXISTS idx_assets_sync_code ON assets (sync_code)`,
@@ -111,12 +129,34 @@ const ready = client.batch(
   Promise.allSettled([
     client.execute("ALTER TABLE fin_settings ADD COLUMN tax_rate REAL DEFAULT 0"),
     client.execute("ALTER TABLE fin_settings ADD COLUMN cogs_categories TEXT DEFAULT '[]'"),
-  ])
+  ]).then(() =>
+    // One-time migration away from the Gold/Silver grams×price special case:
+    // bake the computed value into `value`, then fold those categories into
+    // 'Other'. Idempotent — after the first run nothing matches.
+    client.batch(
+      [
+        "UPDATE assets SET value = grams * price_per_gram WHERE (value IS NULL OR value = 0) AND grams > 0 AND price_per_gram > 0",
+        "UPDATE assets SET category = 'Other' WHERE category IN ('Gold','Silver')",
+      ],
+      "write"
+    )
+  )
 );
 
 function genId() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 9);
 }
+
+// Seeded per sync code and kind; ids equal the labels the app has always
+// stored on items, so existing rows keep working. 'Other' is permanent and
+// is the reassignment target when a category with items is deleted.
+const DEFAULT_BS_CATEGORIES = {
+  asset: ["Cash", "Bank Accounts", "Property", "Stocks", "Other"],
+  liability: ["Loans", "Credit Card", "Payables", "Other"],
+};
+
+// Which item table each balance-sheet category kind governs.
+const BS_ITEM_TABLES = { asset: "assets", liability: "liabilities" };
 
 // Seeded for every new sync code; label + straight-line useful life.
 const DEFAULT_DEP_CATEGORIES = [
@@ -350,6 +390,69 @@ module.exports = {
     });
     return Number(result.rows[0].n);
   },
+
+  // ---------- balance-sheet categories (assets & liabilities) ----------
+  async getBsCats(code, kind) {
+    await ready;
+    let result = await client.execute({
+      sql: "SELECT id, label FROM bs_categories WHERE sync_code = ? AND kind = ? ORDER BY sort ASC, rowid ASC",
+      args: [code, kind],
+    });
+    if (result.rows.length === 0) {
+      await client.batch(
+        DEFAULT_BS_CATEGORIES[kind].map((label, i) => ({
+          sql: "INSERT OR IGNORE INTO bs_categories (sync_code, kind, id, label, sort) VALUES (?, ?, ?, ?, ?)",
+          args: [code, kind, label, label, i],
+        })),
+        "write"
+      );
+      result = await client.execute({
+        sql: "SELECT id, label FROM bs_categories WHERE sync_code = ? AND kind = ? ORDER BY sort ASC, rowid ASC",
+        args: [code, kind],
+      });
+    }
+    return result.rows;
+  },
+
+  async addBsCat(code, kind, cat) {
+    await ready;
+    await client.execute({
+      sql: "INSERT INTO bs_categories (sync_code, kind, id, label, sort) VALUES (?, ?, ?, ?, ?)",
+      args: [code, kind, cat.id, cat.label, Date.now()],
+    });
+    return cat;
+  },
+
+  async updateBsCat(code, kind, id, label) {
+    await ready;
+    const result = await client.execute({
+      sql: "UPDATE bs_categories SET label = ? WHERE sync_code = ? AND kind = ? AND id = ?",
+      args: [label, code, kind, id],
+    });
+    return result.rowsAffected > 0;
+  },
+
+  // Items in a deleted category move to the permanent 'Other' so nothing is
+  // lost. Returns how many items moved, or null if the category wasn't found.
+  async deleteBsCat(code, kind, id) {
+    await ready;
+    const del = await client.execute({
+      sql: "DELETE FROM bs_categories WHERE sync_code = ? AND kind = ? AND id = ?",
+      args: [code, kind, id],
+    });
+    if (del.rowsAffected === 0) return null;
+    const moved = await client.execute({
+      sql: `UPDATE ${BS_ITEM_TABLES[kind]} SET category = 'Other' WHERE sync_code = ? AND category = ?`,
+      args: [code, id],
+    });
+    return moved.rowsAffected;
+  },
+
+  // ---------- accounts payable / receivable ----------
+  getApar: (code) => getRows("ap_ar", code),
+  addApar: (code, f) => insertRow("ap_ar", code, { kind: f.kind, name: f.name || "", amount: f.amount || 0, due_date: f.due_date }),
+  updateApar: (code, id, f) => updateRow("ap_ar", code, id, ["name", "amount", "due_date", "paid_date"], f),
+  deleteApar: (code, id) => deleteRow("ap_ar", code, id),
 
   // ---------- depreciation ----------
   async getDepCats(code) {
