@@ -94,9 +94,7 @@ const ready = client.batch(
     `CREATE TABLE IF NOT EXISTS fin_settings (
       sync_code TEXT PRIMARY KEY,
       exchange_rate REAL DEFAULT 47.5,
-      starting_cash REAL DEFAULT 0,
-      unanim_valuation REAL DEFAULT 0,
-      unanim_ownership REAL DEFAULT 0
+      starting_cash REAL DEFAULT 0
     )`,
     `CREATE INDEX IF NOT EXISTS idx_expenses_sync_code ON expenses (sync_code)`,
     `CREATE INDEX IF NOT EXISTS idx_incomes_sync_code ON incomes (sync_code)`,
@@ -442,7 +440,7 @@ module.exports = {
   async getSettings(code) {
     await ready;
     const result = await client.execute({
-      sql: "SELECT exchange_rate, starting_cash, unanim_valuation, unanim_ownership, tax_rate, cogs_categories FROM fin_settings WHERE sync_code = ?",
+      sql: "SELECT exchange_rate, starting_cash, tax_rate, cogs_categories FROM fin_settings WHERE sync_code = ?",
       args: [code],
     });
     const row = result.rows[0];
@@ -455,8 +453,6 @@ module.exports = {
     return {
       exchangeRate: row ? row.exchange_rate : 47.5,
       startingCash: row ? row.starting_cash : 0,
-      unanimValuation: row ? row.unanim_valuation : 0,
-      unanimOwnership: row ? row.unanim_ownership : 0,
       taxRate: row ? row.tax_rate : 0,
       cogsCategories,
     };
@@ -466,21 +462,17 @@ module.exports = {
     const current = await module.exports.getSettings(code);
     const merged = { ...current, ...partial };
     await client.execute({
-      sql: `INSERT INTO fin_settings (sync_code, exchange_rate, starting_cash, unanim_valuation, unanim_ownership, tax_rate, cogs_categories)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+      sql: `INSERT INTO fin_settings (sync_code, exchange_rate, starting_cash, tax_rate, cogs_categories)
+            VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(sync_code) DO UPDATE SET
               exchange_rate = excluded.exchange_rate,
               starting_cash = excluded.starting_cash,
-              unanim_valuation = excluded.unanim_valuation,
-              unanim_ownership = excluded.unanim_ownership,
               tax_rate = excluded.tax_rate,
               cogs_categories = excluded.cogs_categories`,
       args: [
         code,
         merged.exchangeRate,
         merged.startingCash,
-        merged.unanimValuation,
-        merged.unanimOwnership,
         merged.taxRate,
         JSON.stringify(merged.cogsCategories || []),
       ],

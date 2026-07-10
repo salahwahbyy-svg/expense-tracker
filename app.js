@@ -210,7 +210,7 @@
   const fin = {
     loaded: false,
     failed: false,
-    settings: { exchangeRate: 47.5, startingCash: 0, unanimValuation: 0, unanimOwnership: 0, taxRate: 0, cogsCategories: [] },
+    settings: { exchangeRate: 47.5, startingCash: 0, taxRate: 0, cogsCategories: [] },
     cats: { assetCategories: [], liabilityCategories: [], incomeCategories: [], cfSections: [] },
     assets: [],
     liabilities: [],
@@ -664,12 +664,10 @@
 
   function computeNetWorth(mk) {
     const m = mk || monthStr(viewDate);
-    const s = fin.settings;
-    const unanimValue = (Number(s.unanimValuation) || 0) * (Number(s.unanimOwnership) || 0) / 100;
     const fixed = fixedAssetTotals(m);
-    const totalAssets = fin.assets.reduce((sum, a) => sum + assetEffectiveValue(a), 0) + unanimValue + fixed.nbv;
+    const totalAssets = fin.assets.reduce((sum, a) => sum + assetEffectiveValue(a), 0) + fixed.nbv;
     const totalLiabilities = fin.liabilities.reduce((sum, l) => sum + (Number(l.value) || 0), 0);
-    return { totalAssets, totalLiabilities, unanimValue, fixed, netWorth: totalAssets - totalLiabilities };
+    return { totalAssets, totalLiabilities, fixed, netWorth: totalAssets - totalLiabilities };
   }
 
   // Expense log rolled up by month — this is what feeds the P&L expense side.
@@ -1201,18 +1199,6 @@
         <div class="fin-card-title">Assets</div>
         ${assetSections || '<div class="fin-note">No assets yet.</div>'}
         ${fixedSection}
-        <div class="fin-section">
-          <div class="fin-section-heading"><span>Business — Unanim.eg</span><span class="subtotal">${currency(nw.unanimValue)}</span></div>
-          <div class="setting-row">
-            <label>Valuation (E£)</label>
-            <input id="unanimValuation" type="number" inputmode="decimal" value="${escAttr(fin.settings.unanimValuation)}" />
-          </div>
-          <div class="setting-row">
-            <label>Ownership %</label>
-            <input id="unanimOwnership" type="number" inputmode="decimal" value="${escAttr(fin.settings.unanimOwnership)}" />
-          </div>
-          <div class="fin-note">Equity value = valuation × ownership% → ${currency(nw.unanimValue)} (${fmtUsd(nw.unanimValue, rate)})</div>
-        </div>
         <button class="fin-add-btn" id="addAssetBtn">+ Add Asset</button>
         <div class="fin-totals"><span>Total Assets</span><span class="value">${currency(nw.totalAssets)}</span></div>
       </div>
@@ -1236,13 +1222,6 @@
   function wireBalance() {
     wireFinRows(document.getElementById("assetsCard"), "assets", ["value", "grams", "price_per_gram"], "assets");
     wireFinRows(document.getElementById("liabCard"), "liabilities", ["value"], "liabilities");
-
-    document.getElementById("unanimValuation").addEventListener("change", (e) => {
-      saveFinSettings({ unanimValuation: Number(e.target.value) || 0 });
-    });
-    document.getElementById("unanimOwnership").addEventListener("change", (e) => {
-      saveFinSettings({ unanimOwnership: Number(e.target.value) || 0 });
-    });
 
     document.getElementById("addAssetBtn").addEventListener("click", () => {
       openFinSheet({

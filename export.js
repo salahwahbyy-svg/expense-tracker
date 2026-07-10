@@ -93,8 +93,7 @@ async function buildStatementData(code, month) {
     .filter((it) => Dep.purchasedInMonth(it, month))
     .map((it) => ({ name: it.name || "item", value: -(Number(it.cost) || 0) }));
 
-  const unanimValue = (Number(settings.unanimValuation) || 0) * (Number(settings.unanimOwnership) || 0) / 100;
-  const totalAssets = assets.reduce((s, a) => s + assetEffectiveValue(a), 0) + unanimValue + fixedNbv;
+  const totalAssets = assets.reduce((s, a) => s + assetEffectiveValue(a), 0) + fixedNbv;
   const totalLiabilities = liabilities.reduce((s, l) => s + (Number(l.value) || 0), 0);
 
   const cogsSet = new Set(settings.cogsCategories || []);
@@ -132,7 +131,6 @@ async function buildStatementData(code, month) {
     totalIncome,
     assets,
     liabilities,
-    unanimValue,
     totalAssets,
     totalLiabilities,
     netWorth: totalAssets - totalLiabilities,
@@ -220,7 +218,6 @@ async function buildXlsx(data) {
   data.assets.forEach((a, i) =>
     dataRow(bs, [a.name || a.category, a.category, assetEffectiveValue(a)], { stripe: i % 2 === 0 })
   );
-  dataRow(bs, ["Unanim.eg equity", "Business", data.unanimValue], { stripe: data.assets.length % 2 === 0 });
   if (data.fixedRows.length > 0) {
     headerRow(bs, ["Fixed Asset", "Accum. Depreciation", "Net Book Value"]);
     data.fixedRows.forEach((f, i) => {
@@ -334,7 +331,6 @@ function buildPdf(doc, data) {
 
   pdfSectionHeader(doc, "Balance Sheet");
   data.assets.forEach((a, i) => pdfLine(doc, `${a.name || a.category}  (${a.category})`, assetEffectiveValue(a), { stripe: i % 2 === 0 }));
-  pdfLine(doc, "Unanim.eg equity", data.unanimValue);
   if (data.fixedRows.length > 0) {
     data.fixedRows.forEach((f, i) =>
       pdfLine(doc, `Fixed asset: ${f.name}  (cost ${pdfMoney(f.cost)} − accum. dep ${pdfMoney(f.accum)})`, f.nbv, { stripe: i % 2 === 0 })

@@ -480,7 +480,7 @@ app.get("/api/fin/settings", requireCode, async (req, res, next) => {
 });
 
 app.put("/api/fin/settings", requireCode, async (req, res, next) => {
-  const allowedNums = ["exchangeRate", "startingCash", "unanimValuation", "unanimOwnership", "taxRate"];
+  const allowedNums = ["exchangeRate", "startingCash", "taxRate"];
   const partial = {};
   for (const key of allowedNums) {
     if (key in (req.body || {})) partial[key] = num(req.body[key]);
