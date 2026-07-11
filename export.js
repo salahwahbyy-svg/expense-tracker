@@ -97,7 +97,6 @@ async function buildStatementData(code, month) {
   const apOpen = apar.filter((x) => x.kind === "ap" && isOpenAsOf(x));
   const arOpenTotal = arOpen.reduce((s, x) => s + (Number(x.amount) || 0), 0);
   const apOpenTotal = apOpen.reduce((s, x) => s + (Number(x.amount) || 0), 0);
-  const aparPaidThisMonth = apar.filter((x) => x.paid_date && String(x.paid_date).slice(0, 7) === month);
 
   const totalAssets = assets.reduce((s, a) => s + assetEffectiveValue(a), 0) + fixedNbv + arOpenTotal;
   const totalLiabilities = liabilities.reduce((s, l) => s + (Number(l.value) || 0), 0) + apOpenTotal;
@@ -121,12 +120,11 @@ async function buildStatementData(code, month) {
     income.filter((i) => i.month <= month).reduce((s, i) => s + (Number(i.value) || 0), 0) +
     incomeLog.filter((i) => i.date.slice(0, 7) <= month).reduce((s, i) => s + (Number(i.amount) || 0), 0);
   const priorCashOut = expenses.filter((e) => e.date.slice(0, 7) <= month).reduce((s, e) => s + (Number(e.amount) || 0), 0);
+  // Paid AP/AR carry no separate cash term: paying creates a linked
+  // income/expense entry already inside priorCashIn/priorCashOut.
   const priorPurchases = depItems
     .filter((it) => String(it.date).slice(0, 7) <= month)
     .reduce((s, it) => s + (Number(it.cost) || 0), 0);
-  const priorAparCash = apar
-    .filter((x) => x.paid_date && String(x.paid_date).slice(0, 7) <= month)
-    .reduce((s, x) => s + (x.kind === "ar" ? 1 : -1) * (Number(x.amount) || 0), 0);
 
   return {
     month,
@@ -154,11 +152,10 @@ async function buildStatementData(code, month) {
     apOpen,
     arOpenTotal,
     apOpenTotal,
-    aparPaidThisMonth,
     netIncome: totalIncome - totalExpense - depreciation,
     ratios: { cogs, grossProfit, opex, ebitda, depreciation, ebit, interest, ebt, taxRate, tax, netAfterTax: ebt - tax },
     monthCf,
-    endingCash: (Number(settings.startingCash) || 0) + priorFlows + priorCashIn - priorCashOut - priorPurchases + priorAparCash,
+    endingCash: (Number(settings.startingCash) || 0) + priorFlows + priorCashIn - priorCashOut - priorPurchases,
   };
 }
 
@@ -295,10 +292,6 @@ async function buildXlsx(data) {
     operating: [
       { name: "Net Profit / Loss (from P&L)", value: data.netIncome },
       { name: "Depreciation add-back (non-cash)", value: data.depreciation },
-      ...data.aparPaidThisMonth.map((x) => ({
-        name: x.kind === "ar" ? `AR collected — ${x.name || "Invoice"}` : `AP paid — ${x.name || "Bill"}`,
-        value: (x.kind === "ar" ? 1 : -1) * (Number(x.amount) || 0),
-      })),
     ],
     investing: data.assetPurchases.map((p) => ({ name: `Asset purchase — ${p.name}`, value: p.value })),
     financing: [],
@@ -408,10 +401,6 @@ function buildPdf(doc, data) {
     operating: [
       { name: "Net Profit / Loss (from P&L)", value: data.netIncome },
       { name: "Depreciation add-back (non-cash)", value: data.depreciation },
-      ...data.aparPaidThisMonth.map((x) => ({
-        name: x.kind === "ar" ? `AR collected — ${x.name || "Invoice"}` : `AP paid — ${x.name || "Bill"}`,
-        value: (x.kind === "ar" ? 1 : -1) * (Number(x.amount) || 0),
-      })),
     ],
     investing: data.assetPurchases.map((p) => ({ name: `Asset purchase — ${p.name}`, value: p.value })),
     financing: [],

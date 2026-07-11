@@ -112,7 +112,8 @@ const ready = client.batch(
       name TEXT DEFAULT '',
       amount REAL DEFAULT 0,
       due_date TEXT,
-      paid_date TEXT
+      paid_date TEXT,
+      linked_id TEXT
     )`,
     `CREATE INDEX IF NOT EXISTS idx_ap_ar_sync_code ON ap_ar (sync_code)`,
     `CREATE INDEX IF NOT EXISTS idx_incomes_sync_code ON incomes (sync_code)`,
@@ -129,6 +130,7 @@ const ready = client.batch(
   Promise.allSettled([
     client.execute("ALTER TABLE fin_settings ADD COLUMN tax_rate REAL DEFAULT 0"),
     client.execute("ALTER TABLE fin_settings ADD COLUMN cogs_categories TEXT DEFAULT '[]'"),
+    client.execute("ALTER TABLE ap_ar ADD COLUMN linked_id TEXT"),
   ]).then(() =>
     // One-time migration away from the Gold/Silver grams×price special case:
     // bake the computed value into `value`, then fold those categories into
@@ -451,8 +453,16 @@ module.exports = {
   // ---------- accounts payable / receivable ----------
   getApar: (code) => getRows("ap_ar", code),
   addApar: (code, f) => insertRow("ap_ar", code, { kind: f.kind, name: f.name || "", amount: f.amount || 0, due_date: f.due_date }),
-  updateApar: (code, id, f) => updateRow("ap_ar", code, id, ["name", "amount", "due_date", "paid_date"], f),
+  updateApar: (code, id, f) => updateRow("ap_ar", code, id, ["name", "amount", "due_date", "paid_date", "linked_id"], f),
   deleteApar: (code, id) => deleteRow("ap_ar", code, id),
+  async getAparById(code, id) {
+    await ready;
+    const result = await client.execute({
+      sql: "SELECT * FROM ap_ar WHERE id = ? AND sync_code = ?",
+      args: [id, code],
+    });
+    return result.rows[0] || null;
+  },
 
   // ---------- depreciation ----------
   async getDepCats(code) {

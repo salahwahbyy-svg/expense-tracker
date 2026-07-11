@@ -441,12 +441,56 @@ finCrud("apar", {
         out.due_date = new Date().toISOString().slice(0, 10);
       } else out.due_date = b.due_date;
     }
-    if (partial && "paid_date" in b) {
-      if (b.paid_date !== null && (typeof b.paid_date !== "string" || !DATE_RE.test(b.paid_date))) return null;
-      out.paid_date = b.paid_date;
-    }
+    // paid_date is deliberately not settable here — paying goes through
+    // /pay and /unpay so the linked income/expense entry stays in sync.
     return out;
   },
+});
+
+// Marking an AR paid records the revenue as a Business Income entry on the
+// income log; paying an AP records a Business expense on the expense log.
+// The cash then flows through net income exactly once, and the linked entry
+// is removed again if the item is reopened.
+app.post("/api/fin/apar/:id/pay", requireCode, async (req, res, next) => {
+  try {
+    const row = await db.getAparById(req.syncCode, req.params.id);
+    if (!row) return res.status(404).json({ error: "not_found" });
+    if (row.paid_date) return res.status(400).json({ error: "already_paid" });
+    const bodyDate = (req.body || {}).date;
+    const date = typeof bodyDate === "string" && DATE_RE.test(bodyDate) ? bodyDate : new Date().toISOString().slice(0, 10);
+    const entry = {
+      id: generateCode() + Date.now().toString(36),
+      amount: Number(row.amount) || 0,
+      note: row.name || (row.kind === "ar" ? "Invoice collected" : "Bill paid"),
+      date,
+      createdAt: Date.now(),
+    };
+    if (row.kind === "ar") {
+      await db.addIncome(req.syncCode, { ...entry, category: "Business Income" });
+    } else {
+      await db.addExpense(req.syncCode, { ...entry, category: "business" });
+    }
+    const updated = await db.updateApar(req.syncCode, req.params.id, { paid_date: date, linked_id: entry.id });
+    res.json(updated);
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.post("/api/fin/apar/:id/unpay", requireCode, async (req, res, next) => {
+  try {
+    const row = await db.getAparById(req.syncCode, req.params.id);
+    if (!row) return res.status(404).json({ error: "not_found" });
+    if (!row.paid_date) return res.status(400).json({ error: "not_paid" });
+    if (row.linked_id) {
+      if (row.kind === "ar") await db.deleteIncome(req.syncCode, row.linked_id);
+      else await db.deleteExpense(req.syncCode, row.linked_id);
+    }
+    const updated = await db.updateApar(req.syncCode, req.params.id, { paid_date: null, linked_id: null });
+    res.json(updated);
+  } catch (err) {
+    next(err);
+  }
 });
 
 finCrud("income", {

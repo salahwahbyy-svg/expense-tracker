@@ -765,13 +765,12 @@
       incomes.filter((i) => i.date.slice(0, 7) <= uptoMonth).reduce((s, i) => s + (Number(i.amount) || 0), 0) +
       fin.income.filter((i) => i.month <= uptoMonth).reduce((s, i) => s + (Number(i.value) || 0), 0);
     const cashOut = expenses.filter((e) => e.date.slice(0, 7) <= uptoMonth).reduce((s, e) => s + (Number(e.amount) || 0), 0);
+    // Paid AP/AR need no term of their own: paying creates a linked
+    // income/expense entry, so their cash is already inside cashIn/cashOut.
     const purchases = fin.depitems
       .filter((it) => String(it.date).slice(0, 7) <= uptoMonth)
       .reduce((s, it) => s + (Number(it.cost) || 0), 0);
-    const aparCash = fin.apar
-      .filter((x) => x.paid_date && String(x.paid_date).slice(0, 7) <= uptoMonth)
-      .reduce((s, x) => s + (x.kind === "ar" ? 1 : -1) * (Number(x.amount) || 0), 0);
-    return (Number(fin.settings.startingCash) || 0) + manual + cashIn - cashOut - purchases + aparCash;
+    return (Number(fin.settings.startingCash) || 0) + manual + cashIn - cashOut - purchases;
   }
 
   // Re-render the fin view without destroying an input the user is still
@@ -1697,7 +1696,9 @@
       monthly ? Depreciation.purchasedInMonth(it, m) : Depreciation.purchasedInYear(it, year)
     );
 
-    // AR collected / AP paid in the period are real cash movements.
+    // AP/AR paid in the period: their cash already flows through net income
+    // (paying creates a linked income/expense entry), so they're listed for
+    // visibility but carry no separate cash value.
     const aparPaid = fin.apar.filter((x) => {
       if (!x.paid_date) return false;
       const pm = String(x.paid_date).slice(0, 7);
@@ -1708,10 +1709,6 @@
       operating: [
         { name: "Net Profit / Loss (from P&L)", value: netIncome },
         { name: "Depreciation add-back (non-cash)", value: periodDep },
-        ...aparPaid.map((x) => ({
-          name: x.kind === "ar" ? `AR collected — ${x.name || "Invoice"}` : `AP paid — ${x.name || "Bill"}`,
-          value: (x.kind === "ar" ? 1 : -1) * (Number(x.amount) || 0),
-        })),
       ],
       investing: purchases.map((it) => ({ name: `Asset purchase — ${it.name || "item"}`, value: -(Number(it.cost) || 0) })),
       financing: [],
@@ -1794,7 +1791,7 @@
     const aparCard = `
       <div class="fin-card" id="aparCard">
         <div class="fin-card-title">Receivables &amp; Payables</div>
-        <div class="fin-note">Open items sit on the Balance Sheet (AR = current asset, AP = current liability). Tap ✓ when one is paid — the cash moves here in that month.</div>
+        <div class="fin-note">Open items sit on the Balance Sheet (AR = current asset, AP = current liability). Tap ✓ when one is paid — it's recorded as Business Income on your Income page (AR) or a Business expense on your Spend page (AP), so the cash flows through Net P&L in that month.</div>
         <div class="fin-section">
           <div class="fin-section-heading"><span>Accounts Receivable — money coming in</span><span class="subtotal pos">${currency(arOpenTotal)}</span></div>
           ${aparOpenRows("ar", "e.g. Client invoice")}
@@ -1836,20 +1833,36 @@
     wireFinRows(document.getElementById("cfCard"), "cashflow", ["value"], "cashflow");
     wireFinRows(document.getElementById("aparCard"), "apar", ["amount"], "apar");
 
-    const aparAction = (id, body) => async () => {
+    // Paying/reopening also creates/removes the linked income or expense
+    // entry server-side, so refresh those logs too before re-rendering.
+    const aparAction = (id, action) => async () => {
       try {
-        await finApi(`apar/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify(body) });
-        await reloadFin("apar");
+        await finApi(`apar/${encodeURIComponent(id)}/${action}`, { method: "POST" });
+        await Promise.all([
+          reloadFin("apar"),
+          (async () => {
+            try {
+              incomes = await apiFetchIncomes(syncCode);
+              writeIncomeCache(syncCode, incomes);
+            } catch {}
+          })(),
+          (async () => {
+            try {
+              expenses = await apiFetchExpenses(syncCode);
+              writeCache(syncCode, expenses);
+            } catch {}
+          })(),
+        ]);
       } catch {
         alert("Couldn't save — check your connection.");
       }
-      renderFin();
+      renderAll();
     };
     document.querySelectorAll("#aparCard .apar-paid").forEach((btn) => {
-      btn.addEventListener("click", aparAction(btn.dataset.id, { paid_date: todayStr() }));
+      btn.addEventListener("click", aparAction(btn.dataset.id, "pay"));
     });
     document.querySelectorAll("#aparCard .apar-reopen").forEach((btn) => {
-      btn.addEventListener("click", aparAction(btn.dataset.id, { paid_date: null }));
+      btn.addEventListener("click", aparAction(btn.dataset.id, "unpay"));
     });
 
     const addApar = (kind) => () => {
