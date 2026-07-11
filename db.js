@@ -105,6 +105,15 @@ const ready = client.batch(
       sort INTEGER DEFAULT 0,
       PRIMARY KEY (sync_code, kind, id)
     )`,
+    `CREATE TABLE IF NOT EXISTS income_categories (
+      sync_code TEXT NOT NULL,
+      id TEXT NOT NULL,
+      label TEXT NOT NULL,
+      emoji TEXT DEFAULT '',
+      color TEXT DEFAULT '#9494a3',
+      sort INTEGER DEFAULT 0,
+      PRIMARY KEY (sync_code, id)
+    )`,
     `CREATE TABLE IF NOT EXISTS ap_ar (
       id TEXT PRIMARY KEY,
       sync_code TEXT NOT NULL,
@@ -148,6 +157,16 @@ const ready = client.batch(
 function genId() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 9);
 }
+
+// Seeded per sync code; ids equal the category strings income entries have
+// always stored, so existing rows keep working. 'Other Income' is permanent
+// and is the reassignment target when a category with entries is deleted.
+const DEFAULT_INCOME_CATEGORIES = [
+  { id: "Salary", label: "Salary", emoji: "💼", color: "#6cf0b8" },
+  { id: "Business Income", label: "Business", emoji: "🏪", color: "#5bc0ff" },
+  { id: "Investment Income", label: "Investment", emoji: "📈", color: "#c792ff" },
+  { id: "Other Income", label: "Other", emoji: "💰", color: "#ffd166" },
+];
 
 // Seeded per sync code and kind; ids equal the labels the app has always
 // stored on items, so existing rows keep working. 'Other' is permanent and
@@ -391,6 +410,70 @@ module.exports = {
       args: [code, id],
     });
     return Number(result.rows[0].n);
+  },
+
+  // ---------- income categories ----------
+  async getIncCats(code) {
+    await ready;
+    let result = await client.execute({
+      sql: "SELECT id, label, emoji, color FROM income_categories WHERE sync_code = ? ORDER BY sort ASC, rowid ASC",
+      args: [code],
+    });
+    if (result.rows.length === 0) {
+      await client.batch(
+        DEFAULT_INCOME_CATEGORIES.map((c, i) => ({
+          sql: "INSERT OR IGNORE INTO income_categories (sync_code, id, label, emoji, color, sort) VALUES (?, ?, ?, ?, ?, ?)",
+          args: [code, c.id, c.label, c.emoji, c.color, i],
+        })),
+        "write"
+      );
+      result = await client.execute({
+        sql: "SELECT id, label, emoji, color FROM income_categories WHERE sync_code = ? ORDER BY sort ASC, rowid ASC",
+        args: [code],
+      });
+    }
+    return result.rows;
+  },
+
+  async addIncCat(code, cat) {
+    await ready;
+    await client.execute({
+      sql: "INSERT INTO income_categories (sync_code, id, label, emoji, color, sort) VALUES (?, ?, ?, ?, ?, ?)",
+      args: [code, cat.id, cat.label, cat.emoji, cat.color, Date.now()],
+    });
+    return cat;
+  },
+
+  async updateIncCat(code, id, fields) {
+    await ready;
+    const allowed = ["label", "emoji", "color"];
+    const sets = Object.keys(fields).filter((k) => allowed.includes(k));
+    if (sets.length === 0) return true;
+    const result = await client.execute({
+      sql: `UPDATE income_categories SET ${sets.map((k) => `${k} = ?`).join(",")} WHERE sync_code = ? AND id = ?`,
+      args: [...sets.map((k) => fields[k]), code, id],
+    });
+    return result.rowsAffected > 0;
+  },
+
+  // Entries in a deleted income category (both the income log and legacy
+  // manual P&L lines) move to the permanent 'Other Income'. Returns how many
+  // entries moved, or null if the category wasn't found.
+  async deleteIncCat(code, id) {
+    await ready;
+    const del = await client.execute({
+      sql: "DELETE FROM income_categories WHERE sync_code = ? AND id = ?",
+      args: [code, id],
+    });
+    if (del.rowsAffected === 0) return null;
+    const moved = await client.batch(
+      [
+        { sql: "UPDATE incomes SET category = 'Other Income' WHERE sync_code = ? AND category = ?", args: [code, id] },
+        { sql: "UPDATE pnl_income SET category = 'Other Income' WHERE sync_code = ? AND category = ?", args: [code, id] },
+      ],
+      "write"
+    );
+    return moved.reduce((s, r) => s + r.rowsAffected, 0);
   },
 
   // ---------- balance-sheet categories (assets & liabilities) ----------

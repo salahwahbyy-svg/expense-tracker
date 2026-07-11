@@ -198,7 +198,9 @@ function sanitizeIncomeEntry(body) {
   if (typeof amount !== "number" || !Number.isFinite(amount) || amount <= 0 || amount > 10_000_000) {
     return { error: "invalid_amount" };
   }
-  if (typeof category !== "string" || !INCOME_CATEGORIES.includes(category)) {
+  // Income categories are user-defined (income_categories table); only the
+  // shape is checked here.
+  if (typeof category !== "string" || !category.trim() || category.length > 40) {
     return { error: "invalid_category" };
   }
   if (typeof date !== "string" || !DATE_RE.test(date)) {
@@ -466,7 +468,11 @@ app.post("/api/fin/apar/:id/pay", requireCode, async (req, res, next) => {
       createdAt: Date.now(),
     };
     if (row.kind === "ar") {
-      await db.addIncome(req.syncCode, { ...entry, category: "Business Income" });
+      // Prefer the Business Income category, but fall back to the permanent
+      // Other Income if the user renamed/deleted it.
+      const incCats = await db.getIncCats(req.syncCode);
+      const category = incCats.some((c) => c.id === "Business Income") ? "Business Income" : "Other Income";
+      await db.addIncome(req.syncCode, { ...entry, category });
     } else {
       await db.addExpense(req.syncCode, { ...entry, category: "business" });
     }
@@ -498,7 +504,74 @@ finCrud("income", {
   add: db.addPnlIncome,
   update: db.updatePnlIncome,
   remove: db.deletePnlIncome,
-  sanitize: (b, partial) => pick(b, partial, { category: INCOME_CATEGORIES, name: "name", value: "num", month: "month" }),
+  sanitize: (b, partial) => {
+    const out = pick(b, partial, { name: "name", value: "num", month: "month" });
+    if (!out) return null;
+    if (!partial || "category" in b) {
+      if (typeof b.category !== "string" || !b.category.trim() || b.category.length > 40) return null;
+      out.category = b.category.trim();
+    }
+    return out;
+  },
+});
+
+// ---------- Income category management ----------
+
+app.get("/api/fin/inccats", requireCode, async (req, res, next) => {
+  try {
+    res.json(await db.getIncCats(req.syncCode));
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.post("/api/fin/inccats", requireCode, async (req, res, next) => {
+  const b = req.body || {};
+  if (typeof b.label !== "string" || !b.label.trim()) return res.status(400).json({ error: "invalid_label" });
+  const label = b.label.trim().slice(0, 24);
+  const emoji = typeof b.emoji === "string" ? b.emoji.slice(0, 8) : "";
+  const color = typeof b.color === "string" && COLOR_RE.test(b.color) ? b.color : "#9494a3";
+  try {
+    const existing = new Set((await db.getIncCats(req.syncCode)).map((c) => c.id));
+    let id = label;
+    let n = 2;
+    while (existing.has(id)) id = `${label} ${n++}`;
+    res.status(201).json(await db.addIncCat(req.syncCode, { id, label, emoji, color }));
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.put("/api/fin/inccats/:id", requireCode, async (req, res, next) => {
+  const b = req.body || {};
+  const fields = {};
+  if ("label" in b) {
+    if (typeof b.label !== "string" || !b.label.trim()) return res.status(400).json({ error: "invalid_label" });
+    fields.label = b.label.trim().slice(0, 24);
+  }
+  if ("emoji" in b) fields.emoji = typeof b.emoji === "string" ? b.emoji.slice(0, 8) : "";
+  if ("color" in b) {
+    if (typeof b.color !== "string" || !COLOR_RE.test(b.color)) return res.status(400).json({ error: "invalid_color" });
+    fields.color = b.color;
+  }
+  try {
+    const ok = await db.updateIncCat(req.syncCode, req.params.id, fields);
+    if (!ok) return res.status(404).json({ error: "not_found" });
+    res.json({ id: req.params.id, ...fields });
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.delete("/api/fin/inccats/:id", requireCode, async (req, res, next) => {
+  if (req.params.id === "Other Income") return res.status(400).json({ error: "cannot_delete_other" });
+  try {
+    const moved = await db.deleteIncCat(req.syncCode, req.params.id);
+    if (moved === null) return res.status(404).json({ error: "not_found" });
+    res.json({ moved });
+  } catch (err) {
+    next(err);
+  }
 });
 
 // ---------- Depreciation ----------

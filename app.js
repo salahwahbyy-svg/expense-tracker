@@ -18,10 +18,12 @@
   const CACHE_PREFIX = "expenses:cache:";
   const CATS_CACHE_PREFIX = "expenses:cats:";
   const INCOME_CACHE_PREFIX = "expenses:incomes:";
+  const INC_CATS_CACHE_PREFIX = "expenses:incomeCats:";
 
-  // Income categories are fixed (they match the server's P&L categories);
-  // ids are the exact category strings stored on income entries.
-  const INCOME_CATS = [
+  // Income categories are user-editable and load per sync code; these
+  // defaults are only the offline/first-paint fallback (they match the
+  // server seed). Ids are the exact strings stored on income entries.
+  const DEFAULT_INCOME_CATS = [
     { id: "Salary", label: "Salary", emoji: "💼", color: "#6cf0b8" },
     { id: "Business Income", label: "Business", emoji: "🏪", color: "#5bc0ff" },
     { id: "Investment Income", label: "Investment", emoji: "📈", color: "#c792ff" },
@@ -29,7 +31,25 @@
   ];
 
   function incomeCatById(id) {
-    return INCOME_CATS.find((c) => c.id === id) || { id, label: id, emoji: "💰", color: "#9494a3" };
+    return incomeCats.find((c) => c.id === id) || { id, label: id, emoji: "💰", color: "#9494a3" };
+  }
+
+  function readIncCatsCache(code) {
+    try {
+      const cached = JSON.parse(localStorage.getItem(INC_CATS_CACHE_PREFIX + code));
+      return Array.isArray(cached) && cached.length > 0 ? cached : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async function loadIncCats() {
+    try {
+      incomeCats = await finApi("inccats");
+      localStorage.setItem(INC_CATS_CACHE_PREFIX + syncCode, JSON.stringify(incomeCats));
+    } catch {
+      incomeCats = readIncCatsCache(syncCode) || DEFAULT_INCOME_CATS;
+    }
   }
 
   function currency(n) {
@@ -164,6 +184,7 @@
   let syncCode = localStorage.getItem(CODE_KEY) || "";
   let expenses = syncCode ? readCache(syncCode) : [];
   let incomes = syncCode ? readIncomeCache(syncCode) : [];
+  let incomeCats = (syncCode && readIncCatsCache(syncCode)) || DEFAULT_INCOME_CATS;
 
   // ---- expense categories (dynamic) ----
   function readCatsCache(code) {
@@ -560,7 +581,7 @@
         <div class="total-amount pos">${currency(total)}</div>
         <div class="total-sub">earned this month</div>
       </section>
-      ${bars ? `<section class="chart-card"><div class="chart-title"><span>By category</span></div><div class="bars">${bars}</div></section>` : ""}
+      ${bars ? `<section class="chart-card"><div class="chart-title"><span>By category</span><button id="editIncCatsBtn" class="chart-edit-btn" type="button">✏️ Edit</button></div><div class="bars">${bars}</div></section>` : ""}
       <section class="list-section">
         ${listHtml || '<div class="empty-state" style="display:flex;"><div class="empty-emoji">💰</div><div>No income yet this month</div></div>'}
       </section>
@@ -574,12 +595,22 @@
         if (entry) openIncomeSheet(entry);
       });
     });
+    const editBtn = document.getElementById("editIncCatsBtn");
+    if (editBtn) editBtn.addEventListener("click", openIncCatSheet);
   }
 
   function openIncomeSheet(entry) {
     openFinSheet({
       title: entry ? "Edit income" : "Add income",
-      chips: { label: "Category", options: INCOME_CATS, selected: entry ? incomeCatById(entry.category) : null },
+      chips: {
+        label: "Category",
+        options: incomeCats,
+        selected: entry ? incomeCats.find((c) => c.id === entry.category) || null : null,
+        onEdit: () => {
+          closeFinSheet();
+          openIncCatSheet();
+        },
+      },
       fields: [
         { key: "amount", label: "Amount (E£)", type: "num", placeholder: "0", value: entry ? entry.amount : "" },
         { key: "note", label: "Note (optional)", placeholder: "e.g. July salary", value: entry ? entry.note || "" : "" },
@@ -868,7 +899,9 @@
     const cfg = finSheetConfig;
     let html = "";
     if (cfg.chips) {
-      html += `<div class="field"><label>${escapeHtml(cfg.chips.label)}</label><div class="category-grid" id="finChipGrid"></div></div>`;
+      html += `<div class="field"><label>${escapeHtml(cfg.chips.label)}</label><div class="category-grid" id="finChipGrid"></div>${
+        cfg.chips.onEdit ? '<button id="finChipEditBtn" type="button" class="link-btn">✏️ Edit categories</button>' : ""
+      }</div>`;
     }
     const fields = typeof cfg.fields === "function" ? cfg.fields(finSheetChip) : cfg.fields;
     fields.forEach((f) => {
@@ -893,6 +926,9 @@
           renderFinSheetFields();
         }
       );
+      if (cfg.chips.onEdit) {
+        document.getElementById("finChipEditBtn").addEventListener("click", cfg.chips.onEdit);
+      }
     }
   }
 
@@ -1376,15 +1412,15 @@
     const logTotal = Object.values(logTotals).reduce((s, v) => s + v, 0);
     const totalIncome = manualTotal + logTotal;
 
-    const incomeSections = fin.cats.incomeCategories
+    const incomeSections = incomeCats
       .map((cat) => {
-        const items = incomeItems.filter((i) => i.category === cat);
-        const logAmt = logTotals[cat] || 0;
+        const items = incomeItems.filter((i) => i.category === cat.id);
+        const logAmt = logTotals[cat.id] || 0;
         if (items.length === 0 && logAmt === 0) return "";
         const subtotal = items.reduce((s, i) => s + (Number(i.value) || 0), 0) + logAmt;
         const logRow = logAmt
           ? `<div class="fin-row readonly">
-              <span style="font-size:16px;">${escapeHtml(incomeCatById(cat).emoji)}</span>
+              <span style="font-size:16px;">${escapeHtml(cat.emoji)}</span>
               <span class="f-name" style="flex:1.4;font-size:14px;">From income log</span>
               <span class="row-amount">${currency(logAmt)}</span>
             </div>`
@@ -1399,7 +1435,7 @@
             })
           )
           .join("");
-        return `<div class="fin-section"><div class="fin-section-heading"><span>${escapeHtml(cat)}</span><span class="subtotal">${currency(subtotal)}</span></div>${logRow}${rows}</div>`;
+        return `<div class="fin-section"><div class="fin-section-heading"><span>${escapeHtml(cat.label)}</span><span class="subtotal">${currency(subtotal)}</span></div>${logRow}${rows}</div>`;
       })
       .join("");
 
@@ -2283,6 +2319,98 @@
   document.getElementById("editCatsBtn").addEventListener("click", openCatSheet);
   document.getElementById("editCatsChartBtn").addEventListener("click", openCatSheet);
 
+  // ---- income category editor sheet ----
+  const incCatSheetOverlay = document.getElementById("incCatSheetOverlay");
+  const incCatListEl = document.getElementById("incCatList");
+
+  function openIncCatSheet() {
+    renderIncCatRows();
+    incCatSheetOverlay.classList.add("open");
+  }
+
+  function closeIncCatSheet() {
+    incCatSheetOverlay.classList.remove("open");
+    renderAll();
+  }
+
+  function renderIncCatRows() {
+    incCatListEl.innerHTML = "";
+    incomeCats.forEach((cat) => {
+      const row = document.createElement("div");
+      row.className = "cat-row";
+      row.innerHTML = `
+        <button class="cat-color-dot" style="background:${escAttr(cat.color)}" aria-label="Change color"></button>
+        <input class="cat-emoji" value="${escAttr(cat.emoji)}" maxlength="4" aria-label="Emoji" />
+        <input class="cat-label" value="${escAttr(cat.label)}" maxlength="24" aria-label="Name" />
+        ${cat.id === "Other Income" ? '<span class="cat-lock" title="Permanent">🔒</span>' : '<button class="row-del">✕</button>'}
+      `;
+
+      async function saveIncCat(fields) {
+        try {
+          await finApi(`inccats/${encodeURIComponent(cat.id)}`, { method: "PUT", body: JSON.stringify(fields) });
+          await loadIncCats();
+        } catch {
+          alert("Couldn't save — check your connection.");
+        }
+        renderIncCatRows();
+      }
+
+      row.querySelector(".cat-color-dot").addEventListener("click", () => {
+        const idx = CAT_PALETTE.indexOf(cat.color);
+        saveIncCat({ color: CAT_PALETTE[(idx + 1) % CAT_PALETTE.length] });
+      });
+      row.querySelector(".cat-emoji").addEventListener("change", (e) => saveIncCat({ emoji: e.target.value }));
+      row.querySelector(".cat-label").addEventListener("change", (e) => {
+        if (e.target.value.trim()) saveIncCat({ label: e.target.value.trim() });
+        else renderIncCatRows();
+      });
+
+      const del = row.querySelector(".row-del");
+      if (del) {
+        del.addEventListener("click", async () => {
+          if (!confirm(`Delete "${cat.label}"?\nAny income entries in it will move to Other.`)) return;
+          try {
+            await finApi(`inccats/${encodeURIComponent(cat.id)}`, { method: "DELETE" });
+            await Promise.all([
+              loadIncCats(),
+              reloadFin("income"),
+              (async () => {
+                try {
+                  incomes = await apiFetchIncomes(syncCode);
+                  writeIncomeCache(syncCode, incomes);
+                } catch {
+                  /* keep cached list */
+                }
+              })(),
+            ]);
+          } catch {
+            alert("Couldn't delete — check your connection.");
+          }
+          renderIncCatRows();
+        });
+      }
+
+      incCatListEl.appendChild(row);
+    });
+  }
+
+  document.getElementById("addIncCatBtn").addEventListener("click", async () => {
+    try {
+      await finApi("inccats", {
+        method: "POST",
+        body: JSON.stringify({ label: "New category", emoji: "🏷️", color: CAT_PALETTE[incomeCats.length % CAT_PALETTE.length] }),
+      });
+      await loadIncCats();
+    } catch {
+      alert("Couldn't add — check your connection.");
+    }
+    renderIncCatRows();
+  });
+  document.getElementById("incCatCloseBtn").addEventListener("click", closeIncCatSheet);
+  incCatSheetOverlay.addEventListener("click", (e) => {
+    if (e.target === incCatSheetOverlay) closeIncCatSheet();
+  });
+
   // ---- appearance (light/dark + larger text) ----
   // The saved classes are applied to <html> before first paint by an inline
   // script in index.html; these buttons just toggle and persist them.
@@ -2379,6 +2507,7 @@
         }
       })(),
       loadCats(),
+      loadIncCats(),
       loadFin(),
     ]);
     renderAll();
