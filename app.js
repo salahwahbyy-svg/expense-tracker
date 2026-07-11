@@ -219,8 +219,8 @@
     apar: [],
     depcats: [],
     depitems: [],
-    pnlView: "monthly",
-    cfView: "monthly",
+    pnlPeriod: "month",
+    cfPeriod: "month",
   };
 
   const appRoot = document.getElementById("appRoot");
@@ -733,11 +733,6 @@
     return c ? Number(c.years) || 0 : 0;
   }
 
-  function itemDepForPeriod(it, monthly, mk, year) {
-    const years = depYearsById(it.category);
-    return monthly ? Depreciation.forMonth(it, years, mk) : Depreciation.forYear(it, years, year);
-  }
-
   function depForMonth(mk) {
     return fin.depitems.reduce((s, it) => s + Depreciation.forMonth(it, depYearsById(it.category), mk), 0);
   }
@@ -751,6 +746,63 @@
       accum += Depreciation.accumulated(it, depYearsById(it.category), mk);
     });
     return { cost, accum, nbv: cost - accum };
+  }
+
+  // ---------- reporting periods (P&L / Cash Flow duration filter) ----------
+  const PERIOD_OPTIONS = [
+    { id: "month", label: "Month" },
+    { id: "3m", label: "3 months" },
+    { id: "6m", label: "6 months" },
+    { id: "year", label: "Year" },
+    { id: "12m", label: "12 months" },
+    { id: "all", label: "All time" },
+  ];
+
+  function monthKeyLabel(mk) {
+    return `${MONTH_SHORT[Number(mk.slice(5, 7)) - 1]} ${mk.slice(0, 4)}`;
+  }
+
+  // A period is a window of month keys ending at the viewed month ("year" is
+  // the viewed calendar year, "all" is everything up to the viewed month).
+  function periodRange(id) {
+    const end = monthStr(viewDate);
+    if (id === "year") {
+      const y = viewDate.getFullYear();
+      const months = Array.from({ length: 12 }, (_, i) => `${y}-${String(i + 1).padStart(2, "0")}`);
+      return { id, start: months[0], end: months[11], months, label: String(y) };
+    }
+    if (id === "all") {
+      return { id, start: "0000-01", end, months: null, label: `All time · to ${monthKeyLabel(end)}` };
+    }
+    const n = { month: 1, "3m": 3, "6m": 6, "12m": 12 }[id] || 1;
+    const months = [];
+    for (let i = n - 1; i >= 0; i--) {
+      months.push(monthStr(new Date(viewDate.getFullYear(), viewDate.getMonth() - i, 1)));
+    }
+    const label = n === 1 ? monthKeyLabel(end) : `${monthKeyLabel(months[0])} – ${monthKeyLabel(end)}`;
+    return { id, start: months[0], end, months, label };
+  }
+
+  function inPeriod(r, mk) {
+    return mk >= r.start && mk <= r.end;
+  }
+
+  // Depreciation charged during the period ("all" = everything accumulated
+  // up to the period end).
+  function itemDepForRange(it, r) {
+    const years = depYearsById(it.category);
+    if (!r.months) return Depreciation.accumulated(it, years, r.end);
+    return r.months.reduce((s, mk) => s + Depreciation.forMonth(it, years, mk), 0);
+  }
+
+  function periodSelectHtml(selectId, r) {
+    return `
+      <div class="toggle-row period-row">
+        <select id="${selectId}" class="period-select" aria-label="Period">
+          ${PERIOD_OPTIONS.map((p) => `<option value="${p.id}" ${r.id === p.id ? "selected" : ""}>${p.label}</option>`).join("")}
+        </select>
+        <span class="period-range">${escapeHtml(r.label)}</span>
+      </div>`;
   }
 
   // Ending cash = starting cash + manual flow items + cash net income from
@@ -1308,10 +1360,8 @@
 
   // ---------- P&L ----------
   function renderPnl() {
-    const m = monthStr(viewDate);
-    const year = String(viewDate.getFullYear());
-    const monthly = fin.pnlView === "monthly";
-    const inRange = (mm) => (monthly ? mm === m : mm.slice(0, 4) === year);
+    const r = periodRange(fin.pnlPeriod);
+    const inRange = (mm) => inPeriod(r, mm);
 
     // Income = the income log (entered on the Income tab) plus any manual
     // line items from before the Income tab existed (still editable here).
@@ -1370,12 +1420,12 @@
       .join("");
 
     // ---- depreciation (straight-line, per item from its purchase date) ----
-    const depPeriod = fin.depitems.reduce((s, it) => s + itemDepForPeriod(it, monthly, m, year), 0);
+    const depPeriod = fin.depitems.reduce((s, it) => s + itemDepForRange(it, r), 0);
     const depSections = fin.depcats
       .map((cat) => {
         const items = fin.depitems.filter((it) => it.category === cat.id);
         if (items.length === 0) return "";
-        const subtotal = items.reduce((s, it) => s + itemDepForPeriod(it, monthly, m, year), 0);
+        const subtotal = items.reduce((s, it) => s + itemDepForRange(it, r), 0);
         const rows = items
           .map((it) =>
             finRowHtml(it, {
@@ -1383,7 +1433,7 @@
                 { key: "name", cls: "f-name", placeholder: "Item" },
                 { key: "cost", cls: "f-num", num: true, placeholder: "Cost" },
                 { key: "date", cls: "f-date", date: true },
-                { type: "label", value: itemDepForPeriod(it, monthly, m, year) },
+                { type: "label", value: itemDepForRange(it, r) },
               ],
             })
           )
@@ -1413,10 +1463,7 @@
 
     return `
       ${exportRowHtml()}
-      <div class="toggle-row">
-        <button class="btn-toggle ${monthly ? "active" : ""}" id="pnlMonthly">Monthly</button>
-        <button class="btn-toggle ${!monthly ? "active" : ""}" id="pnlYearly">Yearly</button>
-      </div>
+      ${periodSelectHtml("pnlPeriod", r)}
 
       <div class="fin-card" id="incomeCard">
         <div class="fin-card-title">Income</div>
@@ -1470,8 +1517,7 @@
   }
 
   function wirePnl() {
-    document.getElementById("pnlMonthly").addEventListener("click", () => { fin.pnlView = "monthly"; renderFin(); });
-    document.getElementById("pnlYearly").addEventListener("click", () => { fin.pnlView = "yearly"; renderFin(); });
+    document.getElementById("pnlPeriod").addEventListener("change", (e) => { fin.pnlPeriod = e.target.value; renderFin(); });
     wireFinRows(document.getElementById("incomeCard"), "income", ["value"], "income");
     wireFinRows(document.getElementById("depCard"), "depitems", ["cost"], "depitems");
 
@@ -1679,31 +1725,26 @@
   // ---------- CASH FLOW ----------
   function renderCashflow() {
     const m = monthStr(viewDate);
-    const year = String(viewDate.getFullYear());
-    const monthly = fin.cfView === "monthly";
-    const inRange = (c) => (monthly ? c.month === m : c.month.slice(0, 4) === year);
-    const filtered = fin.cf.filter(inRange);
+    const r = periodRange(fin.cfPeriod);
+    const filtered = fin.cf.filter((c) => inPeriod(r, c.month));
 
     // Indirect method: operating starts from the period's net income (which
     // already includes depreciation as an expense) and adds the non-cash
     // depreciation back; fixed-asset purchases hit investing in full.
-    const months = monthly ? [m] : Array.from({ length: 12 }, (_, i) => `${year}-${String(i + 1).padStart(2, "0")}`);
-    const periodIncome = months.reduce((s, k) => s + incomeTotalForMonth(k), 0);
-    const periodSpent = months.reduce((s, k) => s + expenseTotalForMonth(k), 0);
-    const periodDep = months.reduce((s, k) => s + depForMonth(k), 0);
+    const periodIncome =
+      fin.income.filter((i) => inPeriod(r, i.month)).reduce((s, i) => s + (Number(i.value) || 0), 0) +
+      incomes.filter((i) => inPeriod(r, i.date.slice(0, 7))).reduce((s, i) => s + (Number(i.amount) || 0), 0);
+    const periodSpent = expenses
+      .filter((e) => inPeriod(r, e.date.slice(0, 7)))
+      .reduce((s, e) => s + (Number(e.amount) || 0), 0);
+    const periodDep = fin.depitems.reduce((s, it) => s + itemDepForRange(it, r), 0);
     const netIncome = periodIncome - periodSpent - periodDep;
-    const purchases = fin.depitems.filter((it) =>
-      monthly ? Depreciation.purchasedInMonth(it, m) : Depreciation.purchasedInYear(it, year)
-    );
+    const purchases = fin.depitems.filter((it) => inPeriod(r, String(it.date).slice(0, 7)));
 
     // AP/AR paid in the period: their cash already flows through net income
     // (paying creates a linked income/expense entry), so they're listed for
     // visibility but carry no separate cash value.
-    const aparPaid = fin.apar.filter((x) => {
-      if (!x.paid_date) return false;
-      const pm = String(x.paid_date).slice(0, 7);
-      return monthly ? pm === m : pm.slice(0, 4) === year;
-    });
+    const aparPaid = fin.apar.filter((x) => x.paid_date && inPeriod(r, String(x.paid_date).slice(0, 7)));
 
     const autoRows = {
       operating: [
@@ -1807,10 +1848,7 @@
 
     return `
       ${exportRowHtml()}
-      <div class="toggle-row">
-        <button class="btn-toggle ${monthly ? "active" : ""}" id="cfMonthly">Monthly</button>
-        <button class="btn-toggle ${!monthly ? "active" : ""}" id="cfYearly">Yearly</button>
-      </div>
+      ${periodSelectHtml("cfPeriod", r)}
 
       ${aparCard}
 
@@ -1828,8 +1866,7 @@
   }
 
   function wireCashflow() {
-    document.getElementById("cfMonthly").addEventListener("click", () => { fin.cfView = "monthly"; renderFin(); });
-    document.getElementById("cfYearly").addEventListener("click", () => { fin.cfView = "yearly"; renderFin(); });
+    document.getElementById("cfPeriod").addEventListener("change", (e) => { fin.cfPeriod = e.target.value; renderFin(); });
     wireFinRows(document.getElementById("cfCard"), "cashflow", ["value"], "cashflow");
     wireFinRows(document.getElementById("aparCard"), "apar", ["amount"], "apar");
 
