@@ -2283,6 +2283,36 @@
   document.getElementById("editCatsBtn").addEventListener("click", openCatSheet);
   document.getElementById("editCatsChartBtn").addEventListener("click", openCatSheet);
 
+  // ---- appearance (light/dark + larger text) ----
+  // The saved classes are applied to <html> before first paint by an inline
+  // script in index.html; these buttons just toggle and persist them.
+  const THEME_KEY = "expenses:theme";
+  const BIG_TEXT_KEY = "expenses:bigText";
+  const themeToggle = document.getElementById("themeToggle");
+  const textSizeToggle = document.getElementById("textSizeToggle");
+  const themeColorMeta = document.getElementById("themeColorMeta");
+
+  function syncAppearanceUI() {
+    const light = document.documentElement.classList.contains("light");
+    themeToggle.textContent = light ? "🌙" : "☀️";
+    themeColorMeta.setAttribute("content", light ? "#f4f5f9" : "#0f0f14");
+    textSizeToggle.classList.toggle("active", document.documentElement.classList.contains("big-text"));
+  }
+
+  themeToggle.addEventListener("click", () => {
+    const light = document.documentElement.classList.toggle("light");
+    localStorage.setItem(THEME_KEY, light ? "light" : "dark");
+    syncAppearanceUI();
+  });
+
+  textSizeToggle.addEventListener("click", () => {
+    const big = document.documentElement.classList.toggle("big-text");
+    localStorage.setItem(BIG_TEXT_KEY, big ? "1" : "0");
+    syncAppearanceUI();
+  });
+
+  syncAppearanceUI();
+
   // ---- sync sheet ----
   function openSyncSheet() {
     codeDisplay.textContent = syncCode || "------";

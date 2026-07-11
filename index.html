@@ -7,8 +7,15 @@
 <link rel="manifest" href="manifest.json" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-<meta name="theme-color" content="#0f0f14" />
+<meta name="theme-color" content="#0f0f14" id="themeColorMeta" />
 <link rel="apple-touch-icon" href="icon.png" />
+<script>
+// Apply saved appearance before first paint to avoid a flash.
+try {
+  if (localStorage.getItem("expenses:theme") === "light") document.documentElement.classList.add("light");
+  if (localStorage.getItem("expenses:bigText") === "1") document.documentElement.classList.add("big-text");
+} catch (e) {}
+</script>
 <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
@@ -21,10 +28,14 @@
     <button id="nextMonth" class="nav-btn" aria-label="Next month">›</button>
   </header>
 
-  <button id="syncBadge" class="sync-badge" aria-label="Sync settings">
-    <span class="sync-dot" id="syncDot"></span>
-    <span id="syncBadgeLabel">Syncing…</span>
-  </button>
+  <div class="top-actions">
+    <button id="themeToggle" class="mini-btn" aria-label="Switch between light and dark mode">☀️</button>
+    <button id="syncBadge" class="sync-badge" aria-label="Sync settings">
+      <span class="sync-dot" id="syncDot"></span>
+      <span id="syncBadgeLabel">Syncing…</span>
+    </button>
+    <button id="textSizeToggle" class="mini-btn" aria-label="Toggle larger text">Aa</button>
+  </div>
 
   <div id="view-expenses" class="view active">
     <section class="totals">
