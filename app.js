@@ -255,6 +255,8 @@
   const categoryGrid = document.getElementById("categoryGrid");
   const amountInput = document.getElementById("amountInput");
   const noteInput = document.getElementById("noteInput");
+  const receiptInput = document.getElementById("receiptInput");
+  const receiptField = document.getElementById("receiptField");
   const dateInput = document.getElementById("dateInput");
   const saveBtn = document.getElementById("saveBtn");
   const finView = document.getElementById("view-fin");
@@ -417,11 +419,48 @@
   function renderList(list) {
     listEl.innerHTML = "";
 
-    if (list.length === 0) {
+    const openPayables = fin.apar.filter((x) => x.kind === "ap" && !x.paid_date);
+
+    if (list.length === 0 && openPayables.length === 0) {
       emptyState.style.display = "flex";
       return;
     }
     emptyState.style.display = "none";
+
+    if (openPayables.length > 0) {
+      const group = document.createElement("div");
+      group.className = "day-group";
+
+      const payTotal = openPayables.reduce((sum, x) => sum + (Number(x.amount) || 0), 0);
+      const heading = document.createElement("div");
+      heading.className = "day-heading";
+      heading.innerHTML = `<span>Unpaid payables</span><span class="day-total">${currency(payTotal)}</span>`;
+      group.appendChild(heading);
+
+      openPayables.forEach((x) => {
+        const cat = x.category ? catById(x.category) : null;
+        const iconHtml = cat
+          ? `<div class="expense-icon" style="background:${escAttr(cat.color)}22;color:${escAttr(cat.color)}">${escapeHtml(cat.emoji)}</div>`
+          : `<div class="expense-icon" style="background:#9494a322;color:#9494a3">🧾</div>`;
+        const item = document.createElement("div");
+        item.className = "expense-item";
+        item.innerHTML = `
+          <div class="swipe-content">
+            ${iconHtml}
+            <div class="expense-meta">
+              <div class="expense-category">${escapeHtml(x.name || "Payable")}</div>
+              <div class="expense-note">due ${escapeHtml(x.due_date || "—")}</div>
+            </div>
+            <div class="expense-amount">${currency(x.amount)}</div>
+            <button class="apar-paid list-pay" data-id="${escAttr(x.id)}" title="Mark paid">✓</button>
+          </div>
+        `;
+        item.querySelector(".list-pay").addEventListener("click", () => aparLifecycle(x.id, "pay"));
+        group.appendChild(item);
+      });
+
+      listEl.appendChild(group);
+    }
 
     const sorted = [...list].sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : b.createdAt - a.createdAt));
     const groups = new Map();
@@ -452,6 +491,7 @@
             <div class="expense-meta">
               <div class="expense-category">${escapeHtml(cat.label)}</div>
               ${e.note ? `<div class="expense-note">${escapeHtml(e.note)}</div>` : ""}
+              ${e.receipt ? `<div class="expense-note">🧾 #${escapeHtml(e.receipt)}</div>` : ""}
             </div>
             <div class="expense-amount">${currency(e.amount)}</div>
           </div>
@@ -576,6 +616,38 @@
         </div>`;
     });
 
+    // Open receivables (money expected, not yet collected) get their own
+    // section above the day groups, mirroring the payables section on Spend.
+    const openReceivables = fin.apar.filter((x) => x.kind === "ar" && !x.paid_date);
+    const arTotal = openReceivables.reduce((s, x) => s + (Number(x.amount) || 0), 0);
+    const arRows = openReceivables
+      .map((x) => {
+        const cat = x.category ? incomeCatById(x.category) : null;
+        const iconHtml = cat
+          ? `<div class="expense-icon" style="background:${escAttr(cat.color)}22;color:${escAttr(cat.color)}">${escapeHtml(cat.emoji)}</div>`
+          : `<div class="expense-icon" style="background:#9494a322;color:#9494a3">🧾</div>`;
+        return `
+          <div class="expense-item" data-id="${escAttr(x.id)}">
+            <div class="swipe-content">
+              ${iconHtml}
+              <div class="expense-meta">
+                <div class="expense-category">${escapeHtml(x.name || "Receivable")}</div>
+                <div class="expense-note">due ${escapeHtml(x.due_date || "—")}</div>
+              </div>
+              <div class="expense-amount pos">+${currency(x.amount)}</div>
+              <button class="apar-paid list-pay" data-id="${escAttr(x.id)}" title="Mark paid">✓</button>
+            </div>
+          </div>`;
+      })
+      .join("");
+    const arSection = arRows
+      ? `
+        <div class="day-group">
+          <div class="day-heading"><span>Expected income</span><span class="day-total">${currency(arTotal)}</span></div>
+          ${arRows}
+        </div>`
+      : "";
+
     return `
       <section class="totals">
         <div class="total-amount pos">${currency(total)}</div>
@@ -583,7 +655,7 @@
       </section>
       ${bars ? `<section class="chart-card"><div class="chart-title"><span>By category</span><button id="editIncCatsBtn" class="chart-edit-btn" type="button">✏️ Edit</button></div><div class="bars">${bars}</div></section>` : ""}
       <section class="list-section">
-        ${listHtml || '<div class="empty-state" style="display:flex;"><div class="empty-emoji">💰</div><div>No income yet this month</div></div>'}
+        ${arSection}${listHtml || (arSection ? "" : '<div class="empty-state" style="display:flex;"><div class="empty-emoji">💰</div><div>No income yet this month</div></div>')}
       </section>
     `;
   }
@@ -594,6 +666,9 @@
         const entry = incomes.find((x) => x.id === el.dataset.id);
         if (entry) openIncomeSheet(entry);
       });
+    });
+    finView.querySelectorAll(".list-pay").forEach((btn) => {
+      btn.addEventListener("click", () => aparLifecycle(btn.dataset.id, "pay"));
     });
     const editBtn = document.getElementById("editIncCatsBtn");
     if (editBtn) editBtn.addEventListener("click", openIncCatSheet);
@@ -616,8 +691,17 @@
         { key: "note", label: "Note (optional)", placeholder: "e.g. July salary", value: entry ? entry.note || "" : "" },
         { key: "date", label: "Date", type: "date", value: entry ? entry.date : todayStr() },
       ],
-      onSave: async (cat, values) => {
+      checkbox: entry ? null : { label: "⏳ Not received yet — expected income (AR)", checked: false },
+      onSave: async (cat, values, isAr) => {
         if (!values.amount || values.amount <= 0) throw new Error("invalid_amount");
+        if (isAr) {
+          await finApi("apar", {
+            method: "POST",
+            body: JSON.stringify({ kind: "ar", name: values.note, amount: values.amount, due_date: values.date, category: cat.id }),
+          });
+          await reloadFin("apar");
+          return;
+        }
         const payload = { amount: values.amount, category: cat.id, note: values.note, date: values.date };
         if (entry) {
           const updated = await apiUpdateIncome(syncCode, entry.id, payload);
@@ -897,6 +981,12 @@
 
   function renderFinSheetFields() {
     const cfg = finSheetConfig;
+    // Selecting a chip re-renders these fields; carry over anything the user
+    // already typed (and the checkbox state) so their input isn't lost.
+    const prev = {};
+    finSheetFields.querySelectorAll("input[id^='finField_']").forEach((el) => (prev[el.id] = el.value));
+    const prevCheckEl = document.getElementById("finSheetCheck");
+    const prevChecked = prevCheckEl ? prevCheckEl.classList.contains("active") : null;
     let html = "";
     if (cfg.chips) {
       html += `<div class="field"><label>${escapeHtml(cfg.chips.label)}</label><div class="category-grid" id="finChipGrid"></div>${
@@ -914,7 +1004,23 @@
             value="${escAttr(f.value ?? "")}" placeholder="${escAttr(f.placeholder || "")}" />
         </div>`;
     });
+    if (cfg.checkbox) {
+      html += `<div class="field"><button type="button" id="finSheetCheck" class="asset-toggle${cfg.checkbox.checked ? " active" : ""}">${escapeHtml(cfg.checkbox.label)}</button></div>`;
+    }
     finSheetFields.innerHTML = html;
+
+    Object.entries(prev).forEach(([id, value]) => {
+      const el = document.getElementById(id);
+      if (el) el.value = value;
+    });
+
+    if (cfg.checkbox) {
+      const check = document.getElementById("finSheetCheck");
+      if (prevChecked) check.classList.add("active");
+      check.addEventListener("click", (e) => {
+        e.target.classList.toggle("active");
+      });
+    }
 
     if (cfg.chips) {
       renderChipGrid(
@@ -941,9 +1047,10 @@
       const el = document.getElementById("finField_" + f.key);
       values[f.key] = f.type === "num" ? Number(el.value) || 0 : f.type === "date" ? el.value || todayStr() : el.value.trim();
     }
+    const checked = cfg.checkbox ? document.getElementById("finSheetCheck").classList.contains("active") : false;
     finSaveBtn.disabled = true;
     try {
-      await cfg.onSave(finSheetChip, values);
+      await cfg.onSave(finSheetChip, values, checked);
       closeFinSheet();
       renderFin();
     } catch {
@@ -1901,36 +2008,40 @@
     `;
   }
 
+  // Paying/reopening an AP/AR item also creates/removes the linked income or
+  // expense entry server-side, so refresh those logs too before re-rendering.
+  // Shared by the Cash tab's apar-paid/apar-reopen buttons and the ✓ tick on
+  // the Spend and Income list pages.
+  async function aparLifecycle(id, action) {
+    try {
+      await finApi(`apar/${encodeURIComponent(id)}/${action}`, { method: "POST" });
+      await Promise.all([
+        reloadFin("apar"),
+        (async () => {
+          try {
+            incomes = await apiFetchIncomes(syncCode);
+            writeIncomeCache(syncCode, incomes);
+          } catch {}
+        })(),
+        (async () => {
+          try {
+            expenses = await apiFetchExpenses(syncCode);
+            writeCache(syncCode, expenses);
+          } catch {}
+        })(),
+      ]);
+    } catch {
+      alert("Couldn't save — check your connection.");
+    }
+    renderAll();
+  }
+
   function wireCashflow() {
     document.getElementById("cfPeriod").addEventListener("change", (e) => { fin.cfPeriod = e.target.value; renderFin(); });
     wireFinRows(document.getElementById("cfCard"), "cashflow", ["value"], "cashflow");
     wireFinRows(document.getElementById("aparCard"), "apar", ["amount"], "apar");
 
-    // Paying/reopening also creates/removes the linked income or expense
-    // entry server-side, so refresh those logs too before re-rendering.
-    const aparAction = (id, action) => async () => {
-      try {
-        await finApi(`apar/${encodeURIComponent(id)}/${action}`, { method: "POST" });
-        await Promise.all([
-          reloadFin("apar"),
-          (async () => {
-            try {
-              incomes = await apiFetchIncomes(syncCode);
-              writeIncomeCache(syncCode, incomes);
-            } catch {}
-          })(),
-          (async () => {
-            try {
-              expenses = await apiFetchExpenses(syncCode);
-              writeCache(syncCode, expenses);
-            } catch {}
-          })(),
-        ]);
-      } catch {
-        alert("Couldn't save — check your connection.");
-      }
-      renderAll();
-    };
+    const aparAction = (id, action) => () => aparLifecycle(id, action);
     document.querySelectorAll("#aparCard .apar-paid").forEach((btn) => {
       btn.addEventListener("click", aparAction(btn.dataset.id, "pay"));
     });
@@ -2070,10 +2181,17 @@
   // "Asset" mode inside the Add Expense sheet: instead of a spend entry the
   // save creates a fixed asset (depreciation item). The purchase never hits
   // the spend list — only its monthly depreciation slices do, later.
+  // "Payable" mode instead creates an open AP item (accounts payable) — the
+  // chosen category rides along and is applied to the expense/spend entry
+  // created later when the payable is marked paid. The two modes are
+  // mutually exclusive.
   let assetMode = false;
+  let payableMode = false;
   let selectedDepCat = null;
   const assetToggle = document.getElementById("assetToggle");
   const assetToggleField = document.getElementById("assetToggleField");
+  const payableToggle = document.getElementById("payableToggle");
+  const payableToggleField = document.getElementById("payableToggleField");
   const depOptionsField = document.getElementById("depOptionsField");
   const depCategoryGrid = document.getElementById("depCategoryGrid");
   const dateLabel = document.getElementById("dateLabel");
@@ -2099,15 +2217,26 @@
 
   function updateAssetModeUI() {
     assetToggle.classList.toggle("active", assetMode);
+    payableToggle.classList.toggle("active", payableMode);
+    // Payable mode keeps the category grid — the chosen category is stored
+    // on the payable and applied when it's later marked paid.
     document.getElementById("expenseCategoryField").style.display = assetMode ? "none" : "";
     depOptionsField.style.display = assetMode ? "" : "none";
-    dateLabel.textContent = assetMode ? "Purchase date" : "Date";
-    noteInput.placeholder = assetMode ? "e.g. MacBook Pro" : "e.g. Coffee with Sam";
+    receiptField.style.display = assetMode || payableMode ? "none" : "";
+    dateLabel.textContent = assetMode ? "Purchase date" : payableMode ? "Due date" : "Date";
+    noteInput.placeholder = assetMode ? "e.g. MacBook Pro" : payableMode ? "e.g. Supplier bill" : "e.g. Coffee with Sam";
     if (assetMode) renderDepCategoryGrid();
   }
 
   assetToggle.addEventListener("click", () => {
     assetMode = !assetMode;
+    if (assetMode) payableMode = false;
+    updateAssetModeUI();
+  });
+
+  payableToggle.addEventListener("click", () => {
+    payableMode = !payableMode;
+    if (payableMode) assetMode = false;
     updateAssetModeUI();
   });
 
@@ -2118,13 +2247,16 @@
     selectedCategory = expense ? expense.category : null;
     amountInput.value = expense ? expense.amount : "";
     noteInput.value = expense ? expense.note || "" : "";
+    receiptInput.value = expense ? expense.receipt || "" : "";
     dateInput.value = expense ? expense.date : todayStr();
     sheetTitle.textContent = expense ? "Edit expense" : "Add expense";
     deleteExpenseBtn.style.display = expense ? "block" : "none";
-    // Existing expenses can't be converted in place — the toggle only shows
+    // Existing expenses can't be converted in place — the toggles only show
     // when adding something new.
     assetMode = false;
+    payableMode = false;
     assetToggleField.style.display = expense ? "none" : "";
+    payableToggleField.style.display = expense ? "none" : "";
     updateAssetModeUI();
     renderCategoryGrid();
     sheetOverlay.classList.add("open");
@@ -2193,13 +2325,34 @@
       return;
     }
 
+    if (payableMode) {
+      if (!selectedCategory) return;
+      saveBtn.disabled = true;
+      try {
+        await finApi("apar", {
+          method: "POST",
+          body: JSON.stringify({ kind: "ap", name: note, amount, due_date: date, category: selectedCategory }),
+        });
+        await reloadFin("apar");
+        closeSheet();
+        renderAll();
+        setSyncStatus("online");
+      } catch {
+        setSyncStatus("offline");
+        alert("Couldn't save — check your connection and try again.");
+      } finally {
+        saveBtn.disabled = false;
+      }
+      return;
+    }
+
     if (!selectedCategory) {
       return;
     }
 
     saveBtn.disabled = true;
     try {
-      const payload = { amount, category: selectedCategory, note, date };
+      const payload = { amount, category: selectedCategory, note, date, receipt: receiptInput.value.trim() };
       if (editingExpenseId) {
         const updated = await apiUpdateExpense(syncCode, editingExpenseId, payload);
         expenses = expenses.map((x) => (x.id === editingExpenseId ? { ...x, ...updated } : x));

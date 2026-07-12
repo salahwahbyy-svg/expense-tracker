@@ -816,8 +816,8 @@ html, body {
   color: var(--text);
 }
 
-.fin-row .apar-paid,
-.fin-row .apar-reopen {
+.apar-paid,
+.apar-reopen {
   flex-shrink: 0;
   width: 30px;
   height: 30px;
@@ -832,6 +832,11 @@ html, body {
 .fin-row .apar-reopen {
   background: var(--surface-2);
   color: var(--text-dim);
+}
+
+.swipe-content .apar-paid {
+  margin-left: 8px;
+  flex-shrink: 0;
 }
 
 .fin-row .row-del {

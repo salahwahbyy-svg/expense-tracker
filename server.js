@@ -41,7 +41,7 @@ app.get("/api/expenses", requireCode, async (req, res, next) => {
 });
 
 app.post("/api/expenses", requireCode, async (req, res, next) => {
-  const { amount, category, note, date } = req.body;
+  const { amount, category, note, date, receipt } = req.body;
 
   if (typeof amount !== "number" || !Number.isFinite(amount) || amount <= 0 || amount > 10_000_000) {
     return res.status(400).json({ error: "invalid_amount" });
@@ -53,10 +53,11 @@ app.post("/api/expenses", requireCode, async (req, res, next) => {
     return res.status(400).json({ error: "invalid_date" });
   }
   const safeNote = typeof note === "string" ? note.slice(0, 200) : "";
+  const safeReceipt = typeof receipt === "string" ? receipt.slice(0, 40) : "";
 
   const id = generateCode() + Date.now().toString(36);
   const createdAt = Date.now();
-  const expense = { id, amount, category, note: safeNote, date, createdAt };
+  const expense = { id, amount, category, note: safeNote, date, createdAt, receipt: safeReceipt };
 
   try {
     await db.addExpense(req.syncCode, expense);
@@ -67,7 +68,7 @@ app.post("/api/expenses", requireCode, async (req, res, next) => {
 });
 
 app.put("/api/expenses/:id", requireCode, async (req, res, next) => {
-  const { amount, category, note, date } = req.body;
+  const { amount, category, note, date, receipt } = req.body;
 
   if (typeof amount !== "number" || !Number.isFinite(amount) || amount <= 0 || amount > 10_000_000) {
     return res.status(400).json({ error: "invalid_amount" });
@@ -79,7 +80,8 @@ app.put("/api/expenses/:id", requireCode, async (req, res, next) => {
     return res.status(400).json({ error: "invalid_date" });
   }
   const safeNote = typeof note === "string" ? note.slice(0, 200) : "";
-  const expense = { amount, category, note: safeNote, date };
+  const safeReceipt = typeof receipt === "string" ? receipt.slice(0, 40) : "";
+  const expense = { amount, category, note: safeNote, date, receipt: safeReceipt };
 
   try {
     const updated = await db.updateExpense(req.syncCode, req.params.id, expense);
@@ -194,7 +196,7 @@ app.get("/api/fin/categories", (req, res) => {
 // Mirrors the expense log; entries feed the P&L income side automatically.
 
 function sanitizeIncomeEntry(body) {
-  const { amount, category, note, date } = body || {};
+  const { amount, category, note, date, receipt } = body || {};
   if (typeof amount !== "number" || !Number.isFinite(amount) || amount <= 0 || amount > 10_000_000) {
     return { error: "invalid_amount" };
   }
@@ -206,7 +208,13 @@ function sanitizeIncomeEntry(body) {
   if (typeof date !== "string" || !DATE_RE.test(date)) {
     return { error: "invalid_date" };
   }
-  return { amount, category, note: typeof note === "string" ? note.slice(0, 200) : "", date };
+  return {
+    amount,
+    category,
+    note: typeof note === "string" ? note.slice(0, 200) : "",
+    date,
+    receipt: typeof receipt === "string" ? receipt.slice(0, 40) : "",
+  };
 }
 
 app.get("/api/incomes", requireCode, async (req, res, next) => {
@@ -443,6 +451,15 @@ finCrud("apar", {
         out.due_date = new Date().toISOString().slice(0, 10);
       } else out.due_date = b.due_date;
     }
+    if (!partial || "category" in b) {
+      if (b.category === undefined || b.category === null) {
+        out.category = "";
+      } else if (typeof b.category === "string" && b.category.trim().length <= 40) {
+        out.category = b.category.trim();
+      } else {
+        return null;
+      }
+    }
     // paid_date is deliberately not settable here — paying goes through
     // /pay and /unpay so the linked income/expense entry stays in sync.
     return out;
@@ -467,14 +484,19 @@ app.post("/api/fin/apar/:id/pay", requireCode, async (req, res, next) => {
       date,
       createdAt: Date.now(),
     };
+    const rowCategory = typeof row.category === "string" ? row.category.trim() : "";
     if (row.kind === "ar") {
-      // Prefer the Business Income category, but fall back to the permanent
-      // Other Income if the user renamed/deleted it.
-      const incCats = await db.getIncCats(req.syncCode);
-      const category = incCats.some((c) => c.id === "Business Income") ? "Business Income" : "Other Income";
+      // Prefer the item's stored category; otherwise prefer the Business
+      // Income category, falling back to the permanent Other Income if the
+      // user renamed/deleted it.
+      let category = rowCategory;
+      if (!category) {
+        const incCats = await db.getIncCats(req.syncCode);
+        category = incCats.some((c) => c.id === "Business Income") ? "Business Income" : "Other Income";
+      }
       await db.addIncome(req.syncCode, { ...entry, category });
     } else {
-      await db.addExpense(req.syncCode, { ...entry, category: "business" });
+      await db.addExpense(req.syncCode, { ...entry, category: rowCategory || "business" });
     }
     const updated = await db.updateApar(req.syncCode, req.params.id, { paid_date: date, linked_id: entry.id });
     res.json(updated);

@@ -16,7 +16,8 @@ const ready = client.batch(
       category TEXT NOT NULL,
       note TEXT,
       date TEXT NOT NULL,
-      created_at INTEGER NOT NULL
+      created_at INTEGER NOT NULL,
+      receipt TEXT DEFAULT ''
     )`,
     `CREATE TABLE IF NOT EXISTS incomes (
       id TEXT PRIMARY KEY,
@@ -25,7 +26,8 @@ const ready = client.batch(
       category TEXT NOT NULL,
       note TEXT,
       date TEXT NOT NULL,
-      created_at INTEGER NOT NULL
+      created_at INTEGER NOT NULL,
+      receipt TEXT DEFAULT ''
     )`,
     `CREATE TABLE IF NOT EXISTS assets (
       id TEXT PRIMARY KEY,
@@ -122,7 +124,8 @@ const ready = client.batch(
       amount REAL DEFAULT 0,
       due_date TEXT,
       paid_date TEXT,
-      linked_id TEXT
+      linked_id TEXT,
+      category TEXT DEFAULT ''
     )`,
     `CREATE INDEX IF NOT EXISTS idx_ap_ar_sync_code ON ap_ar (sync_code)`,
     `CREATE INDEX IF NOT EXISTS idx_incomes_sync_code ON incomes (sync_code)`,
@@ -140,6 +143,9 @@ const ready = client.batch(
     client.execute("ALTER TABLE fin_settings ADD COLUMN tax_rate REAL DEFAULT 0"),
     client.execute("ALTER TABLE fin_settings ADD COLUMN cogs_categories TEXT DEFAULT '[]'"),
     client.execute("ALTER TABLE ap_ar ADD COLUMN linked_id TEXT"),
+    client.execute("ALTER TABLE expenses ADD COLUMN receipt TEXT DEFAULT ''"),
+    client.execute("ALTER TABLE incomes ADD COLUMN receipt TEXT DEFAULT ''"),
+    client.execute("ALTER TABLE ap_ar ADD COLUMN category TEXT DEFAULT ''"),
   ]).then(() =>
     // One-time migration away from the Gold/Silver grams×price special case:
     // bake the computed value into `value`, then fold those categories into
@@ -263,7 +269,7 @@ function datedLog(table) {
     async get(code) {
       await ready;
       const result = await client.execute({
-        sql: `SELECT id, amount, category, note, date, created_at as createdAt FROM ${table} WHERE sync_code = ? ORDER BY created_at DESC`,
+        sql: `SELECT id, amount, category, note, date, created_at as createdAt, receipt FROM ${table} WHERE sync_code = ? ORDER BY created_at DESC`,
         args: [code],
       });
       return result.rows.map((r) => ({
@@ -273,22 +279,23 @@ function datedLog(table) {
         note: r.note,
         date: r.date,
         createdAt: Number(r.createdAt),
+        receipt: r.receipt || "",
       }));
     },
 
     async add(code, entry) {
       await ready;
       await client.execute({
-        sql: `INSERT INTO ${table} (id, sync_code, amount, category, note, date, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        args: [entry.id, code, entry.amount, entry.category, entry.note, entry.date, entry.createdAt],
+        sql: `INSERT INTO ${table} (id, sync_code, amount, category, note, date, created_at, receipt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        args: [entry.id, code, entry.amount, entry.category, entry.note, entry.date, entry.createdAt, entry.receipt || ""],
       });
     },
 
     async update(code, id, entry) {
       await ready;
       const result = await client.execute({
-        sql: `UPDATE ${table} SET amount = ?, category = ?, note = ?, date = ? WHERE id = ? AND sync_code = ?`,
-        args: [entry.amount, entry.category, entry.note, entry.date, id, code],
+        sql: `UPDATE ${table} SET amount = ?, category = ?, note = ?, date = ?, receipt = ? WHERE id = ? AND sync_code = ?`,
+        args: [entry.amount, entry.category, entry.note, entry.date, entry.receipt || "", id, code],
       });
       return result.rowsAffected > 0;
     },
@@ -535,8 +542,8 @@ module.exports = {
 
   // ---------- accounts payable / receivable ----------
   getApar: (code) => getRows("ap_ar", code),
-  addApar: (code, f) => insertRow("ap_ar", code, { kind: f.kind, name: f.name || "", amount: f.amount || 0, due_date: f.due_date }),
-  updateApar: (code, id, f) => updateRow("ap_ar", code, id, ["name", "amount", "due_date", "paid_date", "linked_id"], f),
+  addApar: (code, f) => insertRow("ap_ar", code, { kind: f.kind, name: f.name || "", amount: f.amount || 0, due_date: f.due_date, category: f.category || "" }),
+  updateApar: (code, id, f) => updateRow("ap_ar", code, id, ["name", "amount", "due_date", "paid_date", "linked_id", "category"], f),
   deleteApar: (code, id) => deleteRow("ap_ar", code, id),
   async getAparById(code, id) {
     await ready;
