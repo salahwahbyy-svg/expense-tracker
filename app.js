@@ -455,7 +455,12 @@
             <button class="apar-paid list-pay" data-id="${escAttr(x.id)}" title="Mark paid">✓</button>
           </div>
         `;
-        item.querySelector(".list-pay").addEventListener("click", () => aparLifecycle(x.id, "pay"));
+        item.querySelector(".list-pay").addEventListener("click", (e) => {
+          e.stopPropagation();
+          aparLifecycle(x.id, "pay");
+        });
+        // Tap the row (not the ✓) to edit or delete the payable.
+        item.querySelector(".swipe-content").addEventListener("click", () => openAparSheet(x));
         group.appendChild(item);
       });
 
@@ -603,6 +608,7 @@
                 <div class="expense-meta">
                   <div class="expense-category">${escapeHtml(cat.label)}</div>
                   ${e.note ? `<div class="expense-note">${escapeHtml(e.note)}</div>` : ""}
+                  ${e.receipt ? `<div class="expense-note">🧾 #${escapeHtml(e.receipt)}</div>` : ""}
                 </div>
                 <div class="expense-amount pos">+${currency(e.amount)}</div>
               </div>
@@ -627,7 +633,7 @@
           ? `<div class="expense-icon" style="background:${escAttr(cat.color)}22;color:${escAttr(cat.color)}">${escapeHtml(cat.emoji)}</div>`
           : `<div class="expense-icon" style="background:#9494a322;color:#9494a3">🧾</div>`;
         return `
-          <div class="expense-item" data-id="${escAttr(x.id)}">
+          <div class="expense-item apar-item" data-id="${escAttr(x.id)}">
             <div class="swipe-content">
               ${iconHtml}
               <div class="expense-meta">
@@ -668,7 +674,17 @@
       });
     });
     finView.querySelectorAll(".list-pay").forEach((btn) => {
-      btn.addEventListener("click", () => aparLifecycle(btn.dataset.id, "pay"));
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        aparLifecycle(btn.dataset.id, "pay");
+      });
+    });
+    // Tap an expected-income row (not the ✓) to edit or delete it.
+    finView.querySelectorAll(".apar-item").forEach((el) => {
+      el.addEventListener("click", () => {
+        const item = fin.apar.find((x) => x.id === el.dataset.id);
+        if (item) openAparSheet(item);
+      });
     });
     const editBtn = document.getElementById("editIncCatsBtn");
     if (editBtn) editBtn.addEventListener("click", openIncCatSheet);
@@ -687,6 +703,7 @@
         },
       },
       fields: [
+        { key: "receipt", label: "Receipt number (optional)", placeholder: "e.g. 45821", value: entry ? entry.receipt || "" : "" },
         { key: "amount", label: "Amount (E£)", type: "num", placeholder: "0", value: entry ? entry.amount : "" },
         { key: "note", label: "Note (optional)", placeholder: "e.g. July salary", value: entry ? entry.note || "" : "" },
         { key: "date", label: "Date", type: "date", value: entry ? entry.date : todayStr() },
@@ -702,15 +719,19 @@
           await reloadFin("apar");
           return;
         }
-        const payload = { amount: values.amount, category: cat.id, note: values.note, date: values.date };
-        if (entry) {
-          const updated = await apiUpdateIncome(syncCode, entry.id, payload);
-          incomes = incomes.map((x) => (x.id === entry.id ? { ...x, ...updated } : x));
+        // Optimistic: the entry shows instantly and syncs in the background,
+        // so a cold-starting server never blocks the sheet.
+        const payload = { amount: values.amount, category: cat.id, note: values.note, date: values.date, receipt: values.receipt };
+        const editingId = entry ? entry.id : null;
+        const tempId = "tmp" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+        const before = editingId ? incomes.find((x) => x.id === editingId) : null;
+        if (editingId) {
+          incomes = incomes.map((x) => (x.id === editingId ? { ...x, ...payload } : x));
         } else {
-          const created = await apiAddIncome(syncCode, payload);
-          incomes.push(created);
+          incomes.push({ id: tempId, createdAt: Date.now(), ...payload });
         }
         writeIncomeCache(syncCode, incomes);
+        syncIncomeEntry(editingId, tempId, payload, before);
       },
       onDelete: entry
         ? async () => {
@@ -722,6 +743,29 @@
           }
         : null,
     });
+  }
+
+  // Background sync for optimistic income saves; rolls back and warns if the
+  // server rejects it.
+  async function syncIncomeEntry(editingId, tempId, payload, before) {
+    try {
+      if (editingId) {
+        const updated = await apiUpdateIncome(syncCode, editingId, payload);
+        incomes = incomes.map((x) => (x.id === editingId ? { ...x, ...updated } : x));
+      } else {
+        const created = await apiAddIncome(syncCode, payload);
+        incomes = incomes.map((x) => (x.id === tempId ? created : x));
+      }
+      writeIncomeCache(syncCode, incomes);
+      setSyncStatus("online");
+    } catch {
+      if (editingId && before) incomes = incomes.map((x) => (x.id === editingId ? before : x));
+      else incomes = incomes.filter((x) => x.id !== tempId);
+      writeIncomeCache(syncCode, incomes);
+      setSyncStatus("offline");
+      alert("Couldn't sync that income — check your connection. The change was undone.");
+    }
+    renderAll();
   }
 
   // ================= FINANCIAL STATEMENTS =================
@@ -969,6 +1013,9 @@
     finSheetConfig = config;
     finSheetChip = config.chips ? config.chips.selected || config.chips.options[0] : null;
     finSheetTitle.textContent = config.title;
+    // Clear leftovers from the previous sheet so the typed-input preservation
+    // in renderFinSheetFields only kicks in for chip re-renders, not opens.
+    finSheetFields.innerHTML = "";
     renderFinSheetFields();
     finDeleteBtn.style.display = config.onDelete ? "block" : "none";
     finSheetOverlay.classList.add("open");
@@ -1052,7 +1099,9 @@
     try {
       await cfg.onSave(finSheetChip, values, checked);
       closeFinSheet();
-      renderFin();
+      // renderAll (not renderFin): this sheet can be opened from the Spend
+      // page too (payable rows), which renderFin would skip.
+      renderAll();
     } catch {
       alert("Couldn't save — check your connection and try again.");
     } finally {
@@ -1072,7 +1121,7 @@
       // onDelete returns false when the user cancels its confirm dialog.
       if ((await finSheetConfig.onDelete()) === false) return;
       closeFinSheet();
-      renderFin();
+      renderAll();
     } catch {
       alert("Couldn't delete — check your connection and try again.");
     }
@@ -1884,11 +1933,6 @@
     const netIncome = periodIncome - periodSpent - periodDep;
     const purchases = fin.depitems.filter((it) => inPeriod(r, String(it.date).slice(0, 7)));
 
-    // AP/AR paid in the period: their cash already flows through net income
-    // (paying creates a linked income/expense entry), so they're listed for
-    // visibility but carry no separate cash value.
-    const aparPaid = fin.apar.filter((x) => x.paid_date && inPeriod(r, String(x.paid_date).slice(0, 7)));
-
     const autoRows = {
       operating: [
         { name: "Net Profit / Loss (from P&L)", value: netIncome },
@@ -1943,57 +1987,9 @@
 
     const cash = endingCashBalance(m);
 
-    // AP/AR management: open items are editable with a "mark paid" action;
-    // items paid in the visible period can be reopened.
-    const aparOpenRows = (kind, fallback) =>
-      fin.apar
-        .filter((x) => x.kind === kind && !x.paid_date)
-        .map(
-          (x) => `
-          <div class="fin-row" data-id="${escAttr(x.id)}">
-            <input class="f-name" data-field="name" value="${escAttr(x.name ?? "")}" placeholder="${fallback}" />
-            <input class="f-num" data-field="amount" type="number" inputmode="decimal" step="0.01" value="${escAttr(x.amount ?? "")}" placeholder="Amount" />
-            <input class="f-date" data-field="due_date" type="date" value="${escAttr(x.due_date ?? "")}" />
-            <button class="apar-paid" data-id="${escAttr(x.id)}" title="Mark paid">✓</button>
-            <button class="row-del">✕</button>
-          </div>`
-        )
-        .join("");
-    const aparPaidRows = aparPaid
-      .map(
-        (x) => `
-        <div class="fin-row readonly">
-          <span class="f-name" style="flex:1.4;font-size:14px;">${escapeHtml(x.name || (x.kind === "ar" ? "Invoice" : "Bill"))} <span style="color:var(--text-dim);font-size:12px;">paid ${escapeHtml(x.paid_date)}</span></span>
-          <span class="row-amount ${x.kind === "ar" ? "pos" : "neg"}">${x.kind === "ar" ? "+" : "−"}${currency(x.amount)}</span>
-          <button class="apar-reopen" data-id="${escAttr(x.id)}" title="Reopen">↩</button>
-        </div>`
-      )
-      .join("");
-    const arOpenTotal = fin.apar.filter((x) => x.kind === "ar" && !x.paid_date).reduce((s, x) => s + (Number(x.amount) || 0), 0);
-    const apOpenTotal = fin.apar.filter((x) => x.kind === "ap" && !x.paid_date).reduce((s, x) => s + (Number(x.amount) || 0), 0);
-
-    const aparCard = `
-      <div class="fin-card" id="aparCard">
-        <div class="fin-card-title">Receivables &amp; Payables</div>
-        <div class="fin-note">Open items sit on the Balance Sheet (AR = current asset, AP = current liability). Tap ✓ when one is paid — it's recorded as Business Income on your Income page (AR) or a Business expense on your Spend page (AP), so the cash flows through Net P&L in that month.</div>
-        <div class="fin-section">
-          <div class="fin-section-heading"><span>Accounts Receivable — money coming in</span><span class="subtotal pos">${currency(arOpenTotal)}</span></div>
-          ${aparOpenRows("ar", "e.g. Client invoice")}
-          <button class="fin-add-btn" id="addArBtn">+ Add Receivable (AR)</button>
-        </div>
-        <div class="fin-section">
-          <div class="fin-section-heading"><span>Accounts Payable — money going out</span><span class="subtotal neg">${currency(apOpenTotal)}</span></div>
-          ${aparOpenRows("ap", "e.g. Supplier bill")}
-          <button class="fin-add-btn" id="addApBtn">+ Add Payable (AP)</button>
-        </div>
-        ${aparPaidRows ? `<div class="fin-section"><div class="fin-section-heading"><span>Paid this period</span></div>${aparPaidRows}</div>` : ""}
-      </div>`;
-
     return `
       ${exportRowHtml()}
       ${periodSelectHtml("cfPeriod", r)}
-
-      ${aparCard}
 
       <div class="fin-card" id="cfCard">
         <div class="setting-row">
@@ -2008,10 +2004,37 @@
     `;
   }
 
+  // Edit or delete an open payable/receivable from its list row (their only
+  // management surface now that the Cash tab card is gone).
+  function openAparSheet(item) {
+    const isAr = item.kind === "ar";
+    const opts = (isAr ? incomeCats : cats).map((c) => ({ id: c.id, label: c.label, emoji: c.emoji }));
+    openFinSheet({
+      title: isAr ? "Edit expected income" : "Edit payable",
+      chips: { label: "Category", options: opts, selected: opts.find((c) => c.id === item.category) || null },
+      fields: [
+        { key: "name", label: "Description", placeholder: isAr ? "e.g. Client invoice" : "e.g. Supplier bill", value: item.name || "" },
+        { key: "amount", label: "Amount (E£)", type: "num", placeholder: "0", value: item.amount },
+        { key: "due_date", label: "Due date", type: "date", value: item.due_date || todayStr() },
+      ],
+      onSave: async (cat, values) => {
+        await finApi(`apar/${encodeURIComponent(item.id)}`, {
+          method: "PUT",
+          body: JSON.stringify({ name: values.name, amount: values.amount, due_date: values.due_date, category: cat.id }),
+        });
+        await reloadFin("apar");
+      },
+      onDelete: async () => {
+        if (!confirm(`Delete this ${isAr ? "expected income" : "payable"}?\n${currency(item.amount)}${item.name ? " · " + item.name : ""}`)) return false;
+        await finApi(`apar/${encodeURIComponent(item.id)}`, { method: "DELETE" });
+        await reloadFin("apar");
+      },
+    });
+  }
+
   // Paying/reopening an AP/AR item also creates/removes the linked income or
   // expense entry server-side, so refresh those logs too before re-rendering.
-  // Shared by the Cash tab's apar-paid/apar-reopen buttons and the ✓ tick on
-  // the Spend and Income list pages.
+  // Shared by the ✓ tick on the Spend and Income list pages.
   async function aparLifecycle(id, action) {
     try {
       await finApi(`apar/${encodeURIComponent(id)}/${action}`, { method: "POST" });
@@ -2039,32 +2062,6 @@
   function wireCashflow() {
     document.getElementById("cfPeriod").addEventListener("change", (e) => { fin.cfPeriod = e.target.value; renderFin(); });
     wireFinRows(document.getElementById("cfCard"), "cashflow", ["value"], "cashflow");
-    wireFinRows(document.getElementById("aparCard"), "apar", ["amount"], "apar");
-
-    const aparAction = (id, action) => () => aparLifecycle(id, action);
-    document.querySelectorAll("#aparCard .apar-paid").forEach((btn) => {
-      btn.addEventListener("click", aparAction(btn.dataset.id, "pay"));
-    });
-    document.querySelectorAll("#aparCard .apar-reopen").forEach((btn) => {
-      btn.addEventListener("click", aparAction(btn.dataset.id, "unpay"));
-    });
-
-    const addApar = (kind) => () => {
-      openFinSheet({
-        title: kind === "ar" ? "Add receivable (AR)" : "Add payable (AP)",
-        fields: [
-          { key: "name", label: "Description", placeholder: kind === "ar" ? "e.g. Client invoice" : "e.g. Supplier bill" },
-          { key: "amount", label: "Amount (E£)", type: "num", placeholder: "0" },
-          { key: "due_date", label: "Due date", type: "date", value: todayStr() },
-        ],
-        onSave: async (_chip, values) => {
-          await finApi("apar", { method: "POST", body: JSON.stringify({ kind, ...values }) });
-          await reloadFin("apar");
-        },
-      });
-    };
-    document.getElementById("addArBtn").addEventListener("click", addApar("ar"));
-    document.getElementById("addApBtn").addEventListener("click", addApar("ap"));
 
     document.getElementById("startingCash").addEventListener("change", (e) => {
       saveFinSettings({ startingCash: Number(e.target.value) || 0 });
@@ -2350,27 +2347,45 @@
       return;
     }
 
-    saveBtn.disabled = true;
+    // Optimistic: the expense shows instantly and syncs in the background,
+    // so a cold-starting server never blocks the sheet.
+    const payload = { amount, category: selectedCategory, note, date, receipt: receiptInput.value.trim() };
+    const editingId = editingExpenseId;
+    const tempId = "tmp" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    const before = editingId ? expenses.find((x) => x.id === editingId) : null;
+    if (editingId) {
+      expenses = expenses.map((x) => (x.id === editingId ? { ...x, ...payload } : x));
+    } else {
+      expenses.push({ id: tempId, createdAt: Date.now(), ...payload });
+    }
+    writeCache(syncCode, expenses);
+    closeSheet();
+    renderAll();
+    syncExpenseEntry(editingId, tempId, payload, before);
+  });
+
+  // Background sync for optimistic expense saves; rolls back and warns if
+  // the server rejects it.
+  async function syncExpenseEntry(editingId, tempId, payload, before) {
     try {
-      const payload = { amount, category: selectedCategory, note, date, receipt: receiptInput.value.trim() };
-      if (editingExpenseId) {
-        const updated = await apiUpdateExpense(syncCode, editingExpenseId, payload);
-        expenses = expenses.map((x) => (x.id === editingExpenseId ? { ...x, ...updated } : x));
+      if (editingId) {
+        const updated = await apiUpdateExpense(syncCode, editingId, payload);
+        expenses = expenses.map((x) => (x.id === editingId ? { ...x, ...updated } : x));
       } else {
         const created = await apiAddExpense(syncCode, payload);
-        expenses.push(created);
+        expenses = expenses.map((x) => (x.id === tempId ? created : x));
       }
       writeCache(syncCode, expenses);
-      closeSheet();
-      renderAll();
       setSyncStatus("online");
     } catch {
+      if (editingId && before) expenses = expenses.map((x) => (x.id === editingId ? before : x));
+      else expenses = expenses.filter((x) => x.id !== tempId);
+      writeCache(syncCode, expenses);
       setSyncStatus("offline");
-      alert("Couldn't save — check your connection and try again.");
-    } finally {
-      saveBtn.disabled = false;
+      alert("Couldn't sync that expense — check your connection. The change was undone.");
     }
-  });
+    renderAll();
+  }
 
   // ---- category editor sheet ----
   const CAT_PALETTE = ["#ff8a5b", "#5bc0ff", "#ffd166", "#c792ff", "#6cf0b8", "#6c8bff", "#ff9ecb", "#ff6b6b", "#9ee37d", "#f4a261", "#9494a3"];
