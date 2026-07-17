@@ -554,6 +554,56 @@ module.exports = {
     return result.rows[0] || null;
   },
 
+  // Paying an AP/AR item writes the linked income/expense entry and marks
+  // the item paid in a single batch, so a crash between the two writes
+  // can't leave one without the other.
+  async payApar(code, id, kind, entry, date) {
+    await ready;
+    const table = kind === "ar" ? "incomes" : "expenses";
+    await client.batch(
+      [
+        {
+          sql: `INSERT INTO ${table} (id, sync_code, amount, category, note, date, created_at, receipt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          args: [entry.id, code, entry.amount, entry.category, entry.note, entry.date, entry.createdAt, entry.receipt || ""],
+        },
+        {
+          sql: "UPDATE ap_ar SET paid_date = ?, linked_id = ? WHERE id = ? AND sync_code = ?",
+          args: [date, entry.id, id, code],
+        },
+      ],
+      "write"
+    );
+    const result = await client.execute({
+      sql: "SELECT * FROM ap_ar WHERE id = ? AND sync_code = ?",
+      args: [id, code],
+    });
+    return result.rows[0];
+  },
+
+  // Reopening an AP/AR item deletes its linked entry and clears paid_date in
+  // a single batch, for the same crash-consistency reason as payApar.
+  async unpayApar(code, row) {
+    await ready;
+    const statements = [];
+    if (row.linked_id) {
+      const table = row.kind === "ar" ? "incomes" : "expenses";
+      statements.push({
+        sql: `DELETE FROM ${table} WHERE id = ? AND sync_code = ?`,
+        args: [row.linked_id, code],
+      });
+    }
+    statements.push({
+      sql: "UPDATE ap_ar SET paid_date = NULL, linked_id = NULL WHERE id = ? AND sync_code = ?",
+      args: [row.id, code],
+    });
+    await client.batch(statements, "write");
+    const result = await client.execute({
+      sql: "SELECT * FROM ap_ar WHERE id = ? AND sync_code = ?",
+      args: [row.id, code],
+    });
+    return result.rows[0];
+  },
+
   // ---------- depreciation ----------
   async getDepCats(code) {
     await ready;

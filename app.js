@@ -273,6 +273,7 @@
   const syncOverlay = document.getElementById("syncOverlay");
   const codeDisplay = document.getElementById("codeDisplay");
   const copyCodeBtn = document.getElementById("copyCodeBtn");
+  const backupBtn = document.getElementById("backupBtn");
   const joinCodeInput = document.getElementById("joinCodeInput");
 
   const MONTH_NAMES = ["January","February","March","April","May","June","July","August","September","October","November","December"];
@@ -2635,9 +2636,15 @@
     }
   });
 
+  backupBtn.addEventListener("click", () => {
+    if (!syncCode) return;
+    window.open("/api/export/json?code=" + encodeURIComponent(syncCode), "_blank");
+  });
+
   document.getElementById("joinCodeBtn").addEventListener("click", async () => {
     const code = joinCodeInput.value.trim().toUpperCase();
-    if (!/^[A-Z0-9]{4,16}$/.test(code)) {
+    if (!/^[A-Z0-9]{6,16}$/.test(code)) {
+      alert("Codes are 6–16 letters/numbers. Check the code and try again.");
       joinCodeInput.focus();
       return;
     }

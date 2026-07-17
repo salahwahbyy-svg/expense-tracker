@@ -4,6 +4,10 @@ const { customAlphabet } = require("nanoid");
 const db = require("./db");
 
 const app = express();
+// Render terminates TLS in front of the app and proxies requests, so req.ip
+// would otherwise be Render's internal address — trust the first hop's
+// X-Forwarded-For so req.ip is the real client IP.
+app.set("trust proxy", 1);
 const PORT = process.env.PORT || 3000;
 
 const CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no 0/O/1/I
@@ -13,8 +17,33 @@ const generateCode = customAlphabet(CODE_ALPHABET, 7);
 // table); the server only validates the id shape.
 const CATEGORY_ID_RE = /^[a-z0-9-]{1,24}$/;
 
-const CODE_RE = /^[A-Z0-9]{4,16}$/;
+// Minimum 6 chars — anything shorter would be trivially guessable by brute
+// force; generated codes are 7 chars (see generateCode above).
+const CODE_RE = /^[A-Z0-9]{6,16}$/;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+// Small hand-rolled rate limiter — no need for a dependency for a fixed
+// window/IP counter. Only guards /api; static files are unaffected.
+const RATE_WINDOW_MS = 60_000;
+const RATE_MAX = 240;
+const rateBuckets = new Map();
+app.use("/api", (req, res, next) => {
+  const now = Date.now();
+  const bucket = rateBuckets.get(req.ip);
+  if (!bucket || now - bucket.start >= RATE_WINDOW_MS) {
+    rateBuckets.set(req.ip, { start: now, count: 1 });
+    return next();
+  }
+  if (++bucket.count > RATE_MAX) return res.status(429).json({ error: "rate_limited" });
+  next();
+});
+// Prune stale buckets so the map doesn't grow forever.
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, bucket] of rateBuckets) {
+    if (now - bucket.start >= RATE_WINDOW_MS) rateBuckets.delete(ip);
+  }
+}, 5 * 60_000).unref();
 
 app.use(express.json());
 app.use(express.static(__dirname));
@@ -485,20 +514,20 @@ app.post("/api/fin/apar/:id/pay", requireCode, async (req, res, next) => {
       createdAt: Date.now(),
     };
     const rowCategory = typeof row.category === "string" ? row.category.trim() : "";
+    let category;
     if (row.kind === "ar") {
       // Prefer the item's stored category; otherwise prefer the Business
       // Income category, falling back to the permanent Other Income if the
       // user renamed/deleted it.
-      let category = rowCategory;
+      category = rowCategory;
       if (!category) {
         const incCats = await db.getIncCats(req.syncCode);
         category = incCats.some((c) => c.id === "Business Income") ? "Business Income" : "Other Income";
       }
-      await db.addIncome(req.syncCode, { ...entry, category });
     } else {
-      await db.addExpense(req.syncCode, { ...entry, category: rowCategory || "business" });
+      category = rowCategory || "business";
     }
-    const updated = await db.updateApar(req.syncCode, req.params.id, { paid_date: date, linked_id: entry.id });
+    const updated = await db.payApar(req.syncCode, req.params.id, row.kind, { ...entry, category }, date);
     res.json(updated);
   } catch (err) {
     next(err);
@@ -510,11 +539,7 @@ app.post("/api/fin/apar/:id/unpay", requireCode, async (req, res, next) => {
     const row = await db.getAparById(req.syncCode, req.params.id);
     if (!row) return res.status(404).json({ error: "not_found" });
     if (!row.paid_date) return res.status(400).json({ error: "not_paid" });
-    if (row.linked_id) {
-      if (row.kind === "ar") await db.deleteIncome(req.syncCode, row.linked_id);
-      else await db.deleteExpense(req.syncCode, row.linked_id);
-    }
-    const updated = await db.updateApar(req.syncCode, req.params.id, { paid_date: null, linked_id: null });
+    const updated = await db.unpayApar(req.syncCode, row);
     res.json(updated);
   } catch (err) {
     next(err);
@@ -765,6 +790,71 @@ app.get("/api/export/xlsx", requireCode, async (req, res, next) => {
   }
 });
 
+// Full-data backup — everything for the sync code as one JSON file, so the
+// user always has a way out of the sync-code model (no accounts to recover).
+app.get("/api/export/json", requireCode, async (req, res, next) => {
+  try {
+    const code = req.syncCode;
+    const [
+      expenses,
+      incomes,
+      categories,
+      incomeCategories,
+      assets,
+      liabilities,
+      pnlIncome,
+      cfItems,
+      apar,
+      depCategories,
+      depItems,
+      bsCategoriesAsset,
+      bsCategoriesLiability,
+      netWorthHistory,
+      settings,
+    ] = await Promise.all([
+      db.getExpenses(code),
+      db.getIncomes(code),
+      db.getCategories(code),
+      db.getIncCats(code),
+      db.getAssets(code),
+      db.getLiabilities(code),
+      db.getPnlIncome(code),
+      db.getCfItems(code),
+      db.getApar(code),
+      db.getDepCats(code),
+      db.getDepItems(code),
+      db.getBsCats(code, "asset"),
+      db.getBsCats(code, "liability"),
+      db.getNetWorthHistory(code),
+      db.getSettings(code),
+    ]);
+    const data = {
+      generatedAt: new Date().toISOString(),
+      syncCode: code,
+      expenses,
+      incomes,
+      categories,
+      incomeCategories,
+      assets,
+      liabilities,
+      pnlIncome,
+      cfItems,
+      apar,
+      depCategories,
+      depItems,
+      bsCategories: { asset: bsCategoriesAsset, liability: bsCategoriesLiability },
+      netWorthHistory,
+      settings,
+    };
+    const filename = `expenses-backup-${new Date().toISOString().slice(0, 10)}.json`;
+    res.setHeader("Content-Type", "application/json");
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    res.send(JSON.stringify(data, null, 2));
+  } catch (err) {
+    next(err);
+  }
+});
+
 app.get("/api/export/pdf", requireCode, async (req, res, next) => {
   try {
     const { buildStatementData, buildPdf, PDFDocument } = require("./export");
@@ -785,6 +875,14 @@ app.get("/healthz", (req, res) => res.send("ok"));
 
 app.get("*", (req, res) => {
   res.sendFile(path.join(__dirname, "index.html"));
+});
+
+// Every route above calls next(err) on failure; without this, Express's
+// default handler would return an HTML error page instead of JSON.
+app.use((err, req, res, next) => {
+  console.error(err);
+  if (res.headersSent) return next(err);
+  res.status(500).json({ error: "server_error" });
 });
 
 app.listen(PORT, () => {
