@@ -58,11 +58,6 @@
     return sign + "E£" + Math.abs(v).toLocaleString("en-US", { maximumFractionDigits: 2 });
   }
 
-  function fmtUsd(v, rate) {
-    const n = (Number(v) || 0) / (Number(rate) || 1);
-    return (n < 0 ? "-" : "") + "$" + Math.abs(Math.round(n)).toLocaleString("en-US");
-  }
-
   function signClass(v) {
     return v > 0 ? "pos" : v < 0 ? "neg" : "";
   }
@@ -1268,7 +1263,6 @@
     const nw = computeNetWorth();
     const m = monthStr(viewDate);
     const year = viewDate.getFullYear();
-    const rate = fin.settings.exchangeRate;
     const income = incomeTotalForMonth(m);
     const spent = expenseTotalForMonth(m);
     const netPL = income - spent - depForMonth(m);
@@ -1329,17 +1323,14 @@
         <div class="stat-card wide">
           <div class="stat-label">Net Worth</div>
           <div class="stat-value ${signClass(nw.netWorth)}">${currency(nw.netWorth)}</div>
-          <div class="stat-sub">${fmtUsd(nw.netWorth, rate)}</div>
         </div>
         <div class="stat-card">
           <div class="stat-label">Total Assets</div>
           <div class="stat-value">${currency(nw.totalAssets)}</div>
-          <div class="stat-sub">${fmtUsd(nw.totalAssets, rate)}</div>
         </div>
         <div class="stat-card">
           <div class="stat-label">Total Liabilities</div>
           <div class="stat-value">${currency(nw.totalLiabilities)}</div>
-          <div class="stat-sub">${fmtUsd(nw.totalLiabilities, rate)}</div>
         </div>
         <div class="stat-card">
           <div class="stat-label">Net P&L · ${MONTH_SHORT[viewDate.getMonth()]}</div>
@@ -1348,13 +1339,6 @@
         <div class="stat-card">
           <div class="stat-label">Ending Cash</div>
           <div class="stat-value ${signClass(cash)}">${currency(cash)}</div>
-        </div>
-      </div>
-
-      <div class="fin-card">
-        <div class="setting-row">
-          <label>Exchange rate — 1 USD =</label>
-          <input id="rateInput" type="number" inputmode="decimal" step="0.01" value="${escAttr(fin.settings.exchangeRate)}" />
         </div>
       </div>
 
@@ -1372,9 +1356,6 @@
   }
 
   function wireOverview() {
-    document.getElementById("rateInput").addEventListener("change", (e) => {
-      saveFinSettings({ exchangeRate: Number(e.target.value) || 47.5 });
-    });
     document.getElementById("snapshotBtn").addEventListener("click", async () => {
       const nw = computeNetWorth();
       try {
@@ -1393,7 +1374,6 @@
   function renderBalance() {
     const m = monthStr(viewDate);
     const nw = computeNetWorth(m);
-    const rate = fin.settings.exchangeRate;
 
     // Fixed assets stay on the books at cost; accumulated depreciation is a
     // computed contra-asset; only the net book value counts toward totals.
@@ -1507,7 +1487,7 @@
       <div class="fin-card">
         <div class="fin-totals" style="border-top:none;margin-top:0;padding-top:0;">
           <span>Net Worth</span>
-          <span class="value ${signClass(nw.netWorth)}">${currency(nw.netWorth)} · ${fmtUsd(nw.netWorth, rate)}</span>
+          <span class="value ${signClass(nw.netWorth)}">${currency(nw.netWorth)}</span>
         </div>
       </div>
     `;
