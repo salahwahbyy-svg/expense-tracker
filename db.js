@@ -146,6 +146,7 @@ const ready = client.batch(
     client.execute("ALTER TABLE expenses ADD COLUMN receipt TEXT DEFAULT ''"),
     client.execute("ALTER TABLE incomes ADD COLUMN receipt TEXT DEFAULT ''"),
     client.execute("ALTER TABLE ap_ar ADD COLUMN category TEXT DEFAULT ''"),
+    client.execute("ALTER TABLE categories ADD COLUMN deleted INTEGER DEFAULT 0"),
   ]).then(() =>
     // One-time migration away from the Gold/Silver grams×price special case:
     // bake the computed value into `value`, then fold those categories into
@@ -353,7 +354,7 @@ module.exports = {
   async getCategories(code) {
     await ready;
     let result = await client.execute({
-      sql: "SELECT id, label, emoji, color, budget FROM categories WHERE sync_code = ? ORDER BY sort ASC, rowid ASC",
+      sql: "SELECT id, label, emoji, color, budget, deleted FROM categories WHERE sync_code = ? ORDER BY sort ASC, rowid ASC",
       args: [code],
     });
     if (result.rows.length === 0) {
@@ -365,7 +366,7 @@ module.exports = {
         "write"
       );
       result = await client.execute({
-        sql: "SELECT id, label, emoji, color, budget FROM categories WHERE sync_code = ? ORDER BY sort ASC, rowid ASC",
+        sql: "SELECT id, label, emoji, color, budget, deleted FROM categories WHERE sync_code = ? ORDER BY sort ASC, rowid ASC",
         args: [code],
       });
     }
@@ -388,26 +389,24 @@ module.exports = {
     if (sets.length === 0) return true;
     const setClause = sets.map((k) => `${k} = ?`).join(",");
     const result = await client.execute({
-      sql: `UPDATE categories SET ${setClause} WHERE sync_code = ? AND id = ?`,
+      sql: `UPDATE categories SET ${setClause} WHERE sync_code = ? AND id = ? AND deleted = 0`,
       args: [...sets.map((k) => fields[k]), code, id],
     });
     return result.rowsAffected > 0;
   },
 
-  // Deleting a category moves its expenses to 'other' so no amounts are
-  // lost. Returns how many expenses were moved, or null if not found.
+  // Deleting a category no longer moves expenses — they keep their category
+  // id and the client shows them as "<label> · deleted". The category row is
+  // just tombstoned so it disappears from pickers/editors. Returns how many
+  // expenses are still attributed to it, or null if not found.
   async deleteCategory(code, id) {
     await ready;
-    const moved = await client.execute({
-      sql: "UPDATE expenses SET category = 'other' WHERE sync_code = ? AND category = ?",
-      args: [code, id],
-    });
     const del = await client.execute({
-      sql: "DELETE FROM categories WHERE sync_code = ? AND id = ?",
+      sql: "UPDATE categories SET deleted = 1 WHERE sync_code = ? AND id = ? AND deleted = 0",
       args: [code, id],
     });
     if (del.rowsAffected === 0) return null;
-    return moved.rowsAffected;
+    return module.exports.countExpensesInCategory(code, id);
   },
 
   async countExpensesInCategory(code, id) {

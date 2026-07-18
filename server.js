@@ -196,9 +196,9 @@ app.delete("/api/categories/:id", requireCode, async (req, res, next) => {
     return res.status(400).json({ error: "cannot_delete_other" });
   }
   try {
-    const moved = await db.deleteCategory(req.syncCode, req.params.id);
-    if (moved === null) return res.status(404).json({ error: "not_found" });
-    res.json({ moved });
+    const kept = await db.deleteCategory(req.syncCode, req.params.id);
+    if (kept === null) return res.status(404).json({ error: "not_found" });
+    res.json({ deleted: true, expenses: kept });
   } catch (err) {
     next(err);
   }

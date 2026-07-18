@@ -197,6 +197,12 @@
     return cats.find((c) => c.id === id) || { id, label: id, emoji: "📦", color: "#9494a3", budget: 0 };
   }
 
+  // A deleted category keeps its identity on old expenses; suffix the label
+  // so the user can see the category itself is gone.
+  function catDisplayLabel(c) {
+    return c.deleted ? `${c.label} · deleted` : c.label;
+  }
+
   async function catsApi(path, opts) {
     const sep = path.includes("?") ? "&" : "?";
     const res = await fetch(`/api/categories${path}${sep}code=${encodeURIComponent(syncCode)}`, {
@@ -323,7 +329,7 @@
   function renderCategoryGrid() {
     renderChipGrid(
       categoryGrid,
-      cats,
+      cats.filter((c) => !c.deleted),
       (cat) => selectedCategory === cat.id,
       (cat) => {
         selectedCategory = cat.id;
@@ -361,7 +367,7 @@
     // at zero spend so budget progress is visible from day one.
     const ids = new Set(Object.keys(totalsByCat));
     cats.forEach((c) => {
-      if (Number(c.budget) > 0) ids.add(c.id);
+      if (!c.deleted && Number(c.budget) > 0) ids.add(c.id);
     });
     const active = [...ids]
       .map((id) => (id === DEPRECIATION_CAT.id && !cats.some((c) => c.id === id) ? DEPRECIATION_CAT : catById(id)))
@@ -391,7 +397,7 @@
       row.className = "bar-row";
       row.innerHTML = `
         <span class="bar-dot" style="background:${cat.color}"></span>
-        <span class="bar-label">${escapeHtml(cat.label)}</span>
+        <span class="bar-label">${escapeHtml(catDisplayLabel(cat))}</span>
         <span class="bar-track"><span class="bar-fill" style="width:${pct}%;background:${fill}"></span></span>
         <span class="bar-amount ${over ? "neg" : ""}">${amountHtml}</span>
       `;
@@ -490,7 +496,7 @@
           <div class="swipe-content">
             <div class="expense-icon" style="background:${escAttr(cat.color)}22;color:${escAttr(cat.color)}">${escapeHtml(cat.emoji)}</div>
             <div class="expense-meta">
-              <div class="expense-category">${escapeHtml(cat.label)}</div>
+              <div class="expense-category">${escapeHtml(catDisplayLabel(cat))}</div>
               ${e.note ? `<div class="expense-note">${escapeHtml(e.note)}</div>` : ""}
               ${e.receipt ? `<div class="expense-note">🧾 #${escapeHtml(e.receipt)}</div>` : ""}
             </div>
@@ -1586,7 +1592,7 @@
         return `
         <div class="fin-row readonly">
           <span style="font-size:16px;">${escapeHtml(c.emoji)}</span>
-          <span class="f-name" style="flex:1.4;font-size:14px;">${escapeHtml(c.label)}</span>
+          <span class="f-name" style="flex:1.4;font-size:14px;">${escapeHtml(catDisplayLabel(c))}</span>
           <span class="row-amount">${currency(v)}</span>
         </div>`;
       })
@@ -1726,7 +1732,7 @@
     const cogsSet = new Set(fin.settings.cogsCategories || []);
     renderChipGrid(
       document.getElementById("cogsGrid"),
-      cats,
+      cats.filter((c) => !c.deleted),
       (cat) => cogsSet.has(cat.id),
       (cat) => {
         if (cogsSet.has(cat.id)) cogsSet.delete(cat.id);
@@ -2386,7 +2392,7 @@
 
   function renderCatRows() {
     catListEl.innerHTML = "";
-    cats.forEach((cat) => {
+    cats.filter((c) => !c.deleted).forEach((cat) => {
       const row = document.createElement("div");
       row.className = "cat-row";
       row.innerHTML = `
@@ -2423,20 +2429,10 @@
       const del = row.querySelector(".row-del");
       if (del) {
         del.addEventListener("click", async () => {
-          if (!confirm(`Delete "${cat.label}"?\nAny expenses in it will move to Other.`)) return;
+          if (!confirm(`Delete "${cat.label}"?\nIts expenses stay in your history, shown as "${cat.label} · deleted".`)) return;
           try {
             await catsApi(`/${encodeURIComponent(cat.id)}`, { method: "DELETE" });
-            await Promise.all([
-              loadCats(),
-              (async () => {
-                try {
-                  expenses = await apiFetchExpenses(syncCode);
-                  writeCache(syncCode, expenses);
-                } catch {
-                  /* keep cached list */
-                }
-              })(),
-            ]);
+            await loadCats();
           } catch {
             alert("Couldn't delete — check your connection.");
           }
