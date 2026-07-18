@@ -2569,7 +2569,9 @@
     const light = document.documentElement.classList.contains("light");
     themeToggle.textContent = light ? "🌙" : "☀️";
     themeColorMeta.setAttribute("content", light ? "#f4f5f9" : "#0f0f14");
-    textSizeToggle.classList.toggle("active", document.documentElement.classList.contains("big-text"));
+    const level = document.documentElement.classList.contains("big-text-2") ? 2 : document.documentElement.classList.contains("big-text") ? 1 : 0;
+    textSizeToggle.classList.toggle("active", level > 0);
+    textSizeToggle.textContent = level === 2 ? "Aa++" : level === 1 ? "Aa+" : "Aa";
   }
 
   themeToggle.addEventListener("click", () => {
@@ -2578,9 +2580,13 @@
     syncAppearanceUI();
   });
 
+  // Cycles normal → +15% → +30% → normal.
   textSizeToggle.addEventListener("click", () => {
-    const big = document.documentElement.classList.toggle("big-text");
-    localStorage.setItem(BIG_TEXT_KEY, big ? "1" : "0");
+    const root = document.documentElement;
+    const level = root.classList.contains("big-text-2") ? 0 : root.classList.contains("big-text") ? 2 : 1;
+    root.classList.toggle("big-text", level === 1);
+    root.classList.toggle("big-text-2", level === 2);
+    localStorage.setItem(BIG_TEXT_KEY, String(level));
     syncAppearanceUI();
   });
 

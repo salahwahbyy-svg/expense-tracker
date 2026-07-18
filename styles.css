@@ -30,9 +30,13 @@
   --tabbar-bg: rgba(255, 255, 255, 0.96);
 }
 
-/* Larger text: scales the whole UI up slightly. */
+/* Larger text: scales the whole UI up. Two steps — the Aa button cycles
+   normal → +15% → +30% → normal. */
 :root.big-text body {
   zoom: 1.15;
+}
+:root.big-text-2 body {
+  zoom: 1.3;
 }
 
 * { box-sizing: border-box; }

@@ -13,7 +13,9 @@
 // Apply saved appearance before first paint to avoid a flash.
 try {
   if (localStorage.getItem("expenses:theme") === "light") document.documentElement.classList.add("light");
-  if (localStorage.getItem("expenses:bigText") === "1") document.documentElement.classList.add("big-text");
+  var bigText = localStorage.getItem("expenses:bigText");
+  if (bigText === "1") document.documentElement.classList.add("big-text");
+  else if (bigText === "2") document.documentElement.classList.add("big-text-2");
 } catch (e) {}
 </script>
 <link rel="stylesheet" href="styles.css" />
