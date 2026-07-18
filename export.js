@@ -87,9 +87,10 @@ async function buildStatementData(code, month) {
     fixedRows.push({ name: it.name || (cat ? cat.label : it.category), cost: Number(it.cost) || 0, accum, nbv: Dep.netBookValue(it, years, month) });
   });
   const fixedNbv = fixedCost - fixedAccum;
-  const assetPurchases = depItems
-    .filter((it) => Dep.purchasedInMonth(it, month))
-    .map((it) => ({ name: it.name || "item", value: -(Number(it.cost) || 0) }));
+  // A cash-bought asset hits cash in its purchase month; one bought on a
+  // payable hits cash only when that payable is settled — see the shared
+  // helper in depreciation.js (also used by app.js so both agree).
+  const assetPurchases = Dep.cashPurchaseRowsForMonth(depItems, apar, month);
 
   // Open AP/AR as of this month (paid items drop off from their paid month).
   const isOpenAsOf = (x) => !x.paid_date || String(x.paid_date).slice(0, 7) > month;
@@ -121,10 +122,10 @@ async function buildStatementData(code, month) {
     incomeLog.filter((i) => i.date.slice(0, 7) <= month).reduce((s, i) => s + (Number(i.amount) || 0), 0);
   const priorCashOut = expenses.filter((e) => e.date.slice(0, 7) <= month).reduce((s, e) => s + (Number(e.amount) || 0), 0);
   // Paid AP/AR carry no separate cash term: paying creates a linked
-  // income/expense entry already inside priorCashIn/priorCashOut.
-  const priorPurchases = depItems
-    .filter((it) => String(it.date).slice(0, 7) <= month)
-    .reduce((s, it) => s + (Number(it.cost) || 0), 0);
+  // income/expense entry already inside priorCashIn/priorCashOut. Fixed-asset
+  // purchases are the exception — see cashPurchasesThroughMonth's doc comment
+  // in depreciation.js for why cash-bought vs. payable-bought differ.
+  const priorPurchases = -Dep.cashPurchasesThroughMonth(depItems, apar, month);
 
   return {
     month,

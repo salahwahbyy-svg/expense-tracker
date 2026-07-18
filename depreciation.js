@@ -66,5 +66,60 @@
     return String(item.date).slice(0, 4) === String(year);
   }
 
-  return { monthKeyIdx, monthlyAmount, forMonth, forYear, accumulated, netBookValue, purchasedInMonth, purchasedInYear };
+  // A fixed asset bought through a payable doesn't touch cash at purchase —
+  // cash leaves in the month the payable is settled. aparRows is the raw
+  // ap_ar list; only rows with asset_id participate.
+  function cashPurchaseRowsForMonth(depItems, aparRows, mk) {
+    const linkedAssetIds = new Set(aparRows.filter((r) => r.asset_id).map((r) => r.asset_id));
+    const rows = [];
+    depItems.forEach((it) => {
+      // No linked payable → it was bought with cash, so it hits cash flow
+      // in its own purchase month.
+      if (purchasedInMonth(it, mk) && !linkedAssetIds.has(it.id)) {
+        rows.push({ name: it.name || "item", value: -(Number(it.cost) || 0) });
+      }
+    });
+    aparRows.forEach((row) => {
+      if (row.asset_id && row.paid_date && String(row.paid_date).slice(0, 7) === mk) {
+        // Label the settlement by the asset it bought — the payable itself
+        // may be unnamed or renamed, but the asset is what the money was for.
+        const asset = depItems.find((it) => it.id === row.asset_id);
+        const name = (asset && asset.name) || row.name || "item";
+        rows.push({ name: name + " · payable settled", value: -(Number(row.amount) || 0) });
+      }
+    });
+    return rows;
+  }
+
+  // Cumulative cash outflow for fixed-asset purchases through and including
+  // month `mk` — same rule as cashPurchaseRowsForMonth, just summed instead
+  // of itemized. Always ≤ 0.
+  function cashPurchasesThroughMonth(depItems, aparRows, mk) {
+    const linkedAssetIds = new Set(aparRows.filter((r) => r.asset_id).map((r) => r.asset_id));
+    let total = 0;
+    depItems.forEach((it) => {
+      if (!linkedAssetIds.has(it.id) && String(it.date).slice(0, 7) <= mk) {
+        total -= Number(it.cost) || 0;
+      }
+    });
+    aparRows.forEach((row) => {
+      if (row.asset_id && row.paid_date && String(row.paid_date).slice(0, 7) <= mk) {
+        total -= Number(row.amount) || 0;
+      }
+    });
+    return total;
+  }
+
+  return {
+    monthKeyIdx,
+    monthlyAmount,
+    forMonth,
+    forYear,
+    accumulated,
+    netBookValue,
+    purchasedInMonth,
+    purchasedInYear,
+    cashPurchaseRowsForMonth,
+    cashPurchasesThroughMonth,
+  };
 });

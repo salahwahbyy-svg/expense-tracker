@@ -506,6 +506,13 @@ app.post("/api/fin/apar/:id/pay", requireCode, async (req, res, next) => {
     if (row.paid_date) return res.status(400).json({ error: "already_paid" });
     const bodyDate = (req.body || {}).date;
     const date = typeof bodyDate === "string" && DATE_RE.test(bodyDate) ? bodyDate : new Date().toISOString().slice(0, 10);
+    // An asset-linked payable's cost already arrives on the P&L via monthly
+    // depreciation — paying it just settles the liability and moves cash
+    // (see Depreciation.cashPurchasesThroughMonth), no new expense entry.
+    if (row.asset_id) {
+      const updated = await db.updateApar(req.syncCode, req.params.id, { paid_date: date });
+      return res.json(updated);
+    }
     const entry = {
       id: generateCode() + Date.now().toString(36),
       amount: Number(row.amount) || 0,
@@ -710,6 +717,31 @@ finCrud("depitems", {
     }
     return out;
   },
+});
+
+// Buying a fixed asset on credit: one call creates both the dep_items row
+// (drives depreciation) and its linked ap_ar payable (the open liability),
+// atomically — see db.addAssetPurchase.
+app.post("/api/fin/asset-purchase", requireCode, async (req, res, next) => {
+  const b = req.body || {};
+  if (typeof b.category !== "string" || !CATEGORY_ID_RE.test(b.category)) {
+    return res.status(400).json({ error: "invalid_category" });
+  }
+  const name = safeName(b.name);
+  const cost = num(b.cost);
+  if (!(cost > 0) || cost > 10_000_000) {
+    return res.status(400).json({ error: "invalid_cost" });
+  }
+  if (typeof b.date !== "string" || !DATE_RE.test(b.date)) {
+    return res.status(400).json({ error: "invalid_date" });
+  }
+  const due_date = typeof b.due_date === "string" && DATE_RE.test(b.due_date) ? b.due_date : new Date().toISOString().slice(0, 10);
+  try {
+    const result = await db.addAssetPurchase(req.syncCode, { category: b.category, name, cost, date: b.date, due_date });
+    res.status(201).json(result);
+  } catch (err) {
+    next(err);
+  }
 });
 
 finCrud("cashflow", {

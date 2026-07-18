@@ -256,8 +256,6 @@
   const categoryGrid = document.getElementById("categoryGrid");
   const amountInput = document.getElementById("amountInput");
   const noteInput = document.getElementById("noteInput");
-  const receiptInput = document.getElementById("receiptInput");
-  const receiptField = document.getElementById("receiptField");
   const dateInput = document.getElementById("dateInput");
   const saveBtn = document.getElementById("saveBtn");
   const finView = document.getElementById("view-fin");
@@ -705,10 +703,9 @@
         },
       },
       fields: [
-        { key: "receipt", label: "Receipt number (optional)", placeholder: "e.g. 45821", value: entry ? entry.receipt || "" : "" },
         { key: "amount", label: "Amount (E£)", type: "num", placeholder: "0", value: entry ? entry.amount : "" },
         { key: "note", label: "Note (optional)", placeholder: "e.g. July salary", value: entry ? entry.note || "" : "" },
-        { key: "date", label: "Date", type: "date", value: entry ? entry.date : todayStr() },
+        { key: "date", label: "Invoice date", type: "date", value: entry ? entry.date : todayStr() },
       ],
       checkbox: entry ? null : { label: "⏳ Not received yet — expected income (AR)", checked: false },
       onSave: async (cat, values, isAr) => {
@@ -722,8 +719,10 @@
           return;
         }
         // Optimistic: the entry shows instantly and syncs in the background,
-        // so a cold-starting server never blocks the sheet.
-        const payload = { amount: values.amount, category: cat.id, note: values.note, date: values.date, receipt: values.receipt };
+        // so a cold-starting server never blocks the sheet. The receipt input
+        // was removed from the sheet; preserve an edited entry's existing
+        // receipt value instead of wiping it, new entries just have none.
+        const payload = { amount: values.amount, category: cat.id, note: values.note, date: values.date, receipt: entry ? entry.receipt || "" : "" };
         const editingId = entry ? entry.id : null;
         const tempId = "tmp" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
         const before = editingId ? incomes.find((x) => x.id === editingId) : null;
@@ -956,6 +955,26 @@
     return r.months.reduce((s, mk) => s + Depreciation.forMonth(it, years, mk), 0);
   }
 
+  // Cash-flow investing rows for a period: built by running the shared
+  // per-month helper (app.js and export.js both use it, so a cash purchase
+  // and a payable settlement never land in different months on either side)
+  // over every month the period covers. "all" has no fixed month list, so
+  // fall back to whichever months actually have a purchase or a settlement.
+  function investingRowsForPeriod(r) {
+    let months = r.months;
+    if (!months) {
+      const set = new Set();
+      fin.depitems.forEach((it) => set.add(String(it.date).slice(0, 7)));
+      fin.apar.forEach((x) => {
+        if (x.asset_id && x.paid_date) set.add(String(x.paid_date).slice(0, 7));
+      });
+      months = Array.from(set)
+        .filter((mk) => inPeriod(r, mk))
+        .sort();
+    }
+    return months.flatMap((mk) => Depreciation.cashPurchaseRowsForMonth(fin.depitems, fin.apar, mk));
+  }
+
   function periodSelectHtml(selectId, r) {
     return `
       <div class="toggle-row period-row">
@@ -980,10 +999,12 @@
     const cashOut = expenses.filter((e) => e.date.slice(0, 7) <= uptoMonth).reduce((s, e) => s + (Number(e.amount) || 0), 0);
     // Paid AP/AR need no term of their own: paying creates a linked
     // income/expense entry, so their cash is already inside cashIn/cashOut.
-    const purchases = fin.depitems
-      .filter((it) => String(it.date).slice(0, 7) <= uptoMonth)
-      .reduce((s, it) => s + (Number(it.cost) || 0), 0);
-    return (Number(fin.settings.startingCash) || 0) + manual + cashIn - cashOut - purchases;
+    // Fixed-asset purchases are the exception: a cash-bought asset pulls cash
+    // at purchase, but one bought on a payable pulls cash only when that
+    // payable is later settled — cashPurchasesThroughMonth (shared with
+    // export.js) already returns a negative total covering both cases.
+    const purchasesCash = Depreciation.cashPurchasesThroughMonth(fin.depitems, fin.apar, uptoMonth);
+    return (Number(fin.settings.startingCash) || 0) + manual + cashIn - cashOut + purchasesCash;
   }
 
   // Re-render the fin view without destroying an input the user is still
@@ -1918,14 +1939,13 @@
       .reduce((s, e) => s + (Number(e.amount) || 0), 0);
     const periodDep = fin.depitems.reduce((s, it) => s + itemDepForRange(it, r), 0);
     const netIncome = periodIncome - periodSpent - periodDep;
-    const purchases = fin.depitems.filter((it) => inPeriod(r, String(it.date).slice(0, 7)));
 
     const autoRows = {
       operating: [
         { name: "Net Profit / Loss (from P&L)", value: netIncome },
         { name: "Depreciation add-back (non-cash)", value: periodDep },
       ],
-      investing: purchases.map((it) => ({ name: `Asset purchase — ${it.name || "item"}`, value: -(Number(it.cost) || 0) })),
+      investing: investingRowsForPeriod(r).map((row) => ({ name: `Asset purchase — ${row.name}`, value: row.value })),
       financing: [],
     };
 
@@ -2167,8 +2187,9 @@
   // the spend list — only its monthly depreciation slices do, later.
   // "Payable" mode instead creates an open AP item (accounts payable) — the
   // chosen category rides along and is applied to the expense/spend entry
-  // created later when the payable is marked paid. The two modes are
-  // mutually exclusive.
+  // created later when the payable is marked paid. The two toggles are
+  // independent and combinable: asset+payable together buys a fixed asset
+  // on credit (see the saveBtn handler's "both" branch).
   let assetMode = false;
   let payableMode = false;
   let selectedDepCat = null;
@@ -2179,6 +2200,8 @@
   const depOptionsField = document.getElementById("depOptionsField");
   const depCategoryGrid = document.getElementById("depCategoryGrid");
   const dateLabel = document.getElementById("dateLabel");
+  const dueDateField = document.getElementById("dueDateField");
+  const dueDateInput = document.getElementById("dueDateInput");
 
   function renderDepCategoryGrid() {
     if (fin.depcats.length === 0) {
@@ -2202,25 +2225,27 @@
   function updateAssetModeUI() {
     assetToggle.classList.toggle("active", assetMode);
     payableToggle.classList.toggle("active", payableMode);
-    // Payable mode keeps the category grid — the chosen category is stored
-    // on the payable and applied when it's later marked paid.
+    const both = assetMode && payableMode;
+    // Payable-only mode keeps the category grid — the chosen category is
+    // stored on the payable and applied when it's later marked paid. Asset
+    // mode (alone or combined with payable) swaps in the dep-category grid.
     document.getElementById("expenseCategoryField").style.display = assetMode ? "none" : "";
     depOptionsField.style.display = assetMode ? "" : "none";
-    receiptField.style.display = assetMode || payableMode ? "none" : "";
-    dateLabel.textContent = assetMode ? "Purchase date" : payableMode ? "Due date" : "Date";
+    // The combined state needs its own due date: the main date field anchors
+    // depreciation (invoice/purchase date) and can't double as the due date.
+    dueDateField.style.display = both ? "" : "none";
+    dateLabel.textContent = assetMode ? "Invoice date" : payableMode ? "Due date" : "Invoice date";
     noteInput.placeholder = assetMode ? "e.g. MacBook Pro" : payableMode ? "e.g. Supplier bill" : "e.g. Coffee with Sam";
     if (assetMode) renderDepCategoryGrid();
   }
 
   assetToggle.addEventListener("click", () => {
     assetMode = !assetMode;
-    if (assetMode) payableMode = false;
     updateAssetModeUI();
   });
 
   payableToggle.addEventListener("click", () => {
     payableMode = !payableMode;
-    if (payableMode) assetMode = false;
     updateAssetModeUI();
   });
 
@@ -2231,8 +2256,8 @@
     selectedCategory = expense ? expense.category : null;
     amountInput.value = expense ? expense.amount : "";
     noteInput.value = expense ? expense.note || "" : "";
-    receiptInput.value = expense ? expense.receipt || "" : "";
     dateInput.value = expense ? expense.date : todayStr();
+    dueDateInput.value = todayStr();
     sheetTitle.textContent = expense ? "Edit expense" : "Add expense";
     deleteExpenseBtn.style.display = expense ? "block" : "none";
     // Existing expenses can't be converted in place — the toggles only show
@@ -2290,6 +2315,28 @@
     const date = dateInput.value || todayStr();
     const note = noteInput.value.trim();
 
+    if (assetMode && payableMode) {
+      if (!selectedDepCat) return;
+      saveBtn.disabled = true;
+      try {
+        await finApi("asset-purchase", {
+          method: "POST",
+          body: JSON.stringify({ category: selectedDepCat, name: note, cost: amount, date, due_date: dueDateInput.value || todayStr() }),
+        });
+        await Promise.all([reloadFin("depitems"), reloadFin("apar")]);
+        closeSheet();
+        renderAll();
+        setSyncStatus("online");
+        alert("Added to Fixed Assets with an open payable.\nDepreciation starts the month after the invoice date; cash leaves when you mark the payable paid.");
+      } catch {
+        setSyncStatus("offline");
+        alert("Couldn't save — check your connection and try again.");
+      } finally {
+        saveBtn.disabled = false;
+      }
+      return;
+    }
+
     if (assetMode) {
       if (!selectedDepCat) return;
       saveBtn.disabled = true;
@@ -2335,11 +2382,14 @@
     }
 
     // Optimistic: the expense shows instantly and syncs in the background,
-    // so a cold-starting server never blocks the sheet.
-    const payload = { amount, category: selectedCategory, note, date, receipt: receiptInput.value.trim() };
+    // so a cold-starting server never blocks the sheet. The receipt input was
+    // removed from the sheet; preserve an edited expense's existing receipt
+    // value instead of wiping it, new entries just have none.
     const editingId = editingExpenseId;
+    const prevExpense = editingId ? expenses.find((x) => x.id === editingId) : null;
+    const payload = { amount, category: selectedCategory, note, date, receipt: prevExpense ? prevExpense.receipt || "" : "" };
     const tempId = "tmp" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-    const before = editingId ? expenses.find((x) => x.id === editingId) : null;
+    const before = prevExpense;
     if (editingId) {
       expenses = expenses.map((x) => (x.id === editingId ? { ...x, ...payload } : x));
     } else {

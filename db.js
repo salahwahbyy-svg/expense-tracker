@@ -147,6 +147,7 @@ const ready = client.batch(
     client.execute("ALTER TABLE incomes ADD COLUMN receipt TEXT DEFAULT ''"),
     client.execute("ALTER TABLE ap_ar ADD COLUMN category TEXT DEFAULT ''"),
     client.execute("ALTER TABLE categories ADD COLUMN deleted INTEGER DEFAULT 0"),
+    client.execute("ALTER TABLE ap_ar ADD COLUMN asset_id TEXT"),
   ]).then(() =>
     // One-time migration away from the Gold/Silver grams×price special case:
     // bake the computed value into `value`, then fold those categories into
@@ -577,6 +578,33 @@ module.exports = {
       args: [id, code],
     });
     return result.rows[0];
+  },
+
+  // Buying a fixed asset on credit: one dep_items row (drives depreciation)
+  // and one linked ap_ar row (the open liability) land together in a single
+  // batch so the asset can never exist without its payable or vice versa.
+  async addAssetPurchase(code, { category, name, cost, date, due_date }) {
+    await ready;
+    const assetId = genId();
+    const aparId = genId();
+    await client.batch(
+      [
+        {
+          sql: "INSERT INTO dep_items (id, sync_code, category, name, cost, date) VALUES (?, ?, ?, ?, ?, ?)",
+          args: [assetId, code, category, name || "", cost || 0, date],
+        },
+        {
+          sql: "INSERT INTO ap_ar (id, sync_code, kind, name, amount, due_date, category, asset_id) VALUES (?, ?, 'ap', ?, ?, ?, '', ?)",
+          args: [aparId, code, name || "", cost || 0, due_date, assetId],
+        },
+      ],
+      "write"
+    );
+    const [assetResult, aparResult] = await Promise.all([
+      client.execute({ sql: "SELECT * FROM dep_items WHERE id = ?", args: [assetId] }),
+      client.execute({ sql: "SELECT * FROM ap_ar WHERE id = ?", args: [aparId] }),
+    ]);
+    return { asset: assetResult.rows[0], payable: aparResult.rows[0] };
   },
 
   // Reopening an AP/AR item deletes its linked entry and clears paid_date in

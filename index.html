@@ -107,19 +107,19 @@ try {
       <button id="editDepCatsFromSheetBtn" type="button" class="link-btn">✏️ Edit depreciation categories</button>
     </div>
 
-    <div class="field" id="receiptField">
-      <label>Receipt number (optional)</label>
-      <input id="receiptInput" type="text" placeholder="e.g. 45821" maxlength="40" />
-    </div>
-
     <div class="field">
       <label>Note (optional)</label>
       <input id="noteInput" type="text" placeholder="e.g. Coffee with Sam" maxlength="60" />
     </div>
 
     <div class="field">
-      <label id="dateLabel">Date</label>
+      <label id="dateLabel">Invoice date</label>
       <input id="dateInput" type="date" />
+    </div>
+
+    <div class="field" id="dueDateField" style="display:none;">
+      <label>Due date</label>
+      <input id="dueDateInput" type="date" />
     </div>
 
     <button id="deleteExpenseBtn" class="btn btn-danger" style="display:none;">Delete expense</button>
