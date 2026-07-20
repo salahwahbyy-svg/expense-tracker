@@ -256,6 +256,8 @@
   const categoryGrid = document.getElementById("categoryGrid");
   const amountInput = document.getElementById("amountInput");
   const noteInput = document.getElementById("noteInput");
+  const receiptInput = document.getElementById("receiptInput");
+  const receiptField = document.getElementById("receiptField");
   const dateInput = document.getElementById("dateInput");
   const saveBtn = document.getElementById("saveBtn");
   const finView = document.getElementById("view-fin");
@@ -705,6 +707,7 @@
       fields: [
         { key: "amount", label: "Amount (E£)", type: "num", placeholder: "0", value: entry ? entry.amount : "" },
         { key: "note", label: "Note (optional)", placeholder: "e.g. July salary", value: entry ? entry.note || "" : "" },
+        { key: "receipt", label: "Invoice number (optional)", placeholder: "e.g. INV-4582", value: entry ? entry.receipt || "" : "" },
         { key: "date", label: "Invoice date", type: "date", value: entry ? entry.date : todayStr() },
       ],
       checkbox: entry ? null : { label: "⏳ Not received yet — expected income (AR)", checked: false },
@@ -719,10 +722,8 @@
           return;
         }
         // Optimistic: the entry shows instantly and syncs in the background,
-        // so a cold-starting server never blocks the sheet. The receipt input
-        // was removed from the sheet; preserve an edited entry's existing
-        // receipt value instead of wiping it, new entries just have none.
-        const payload = { amount: values.amount, category: cat.id, note: values.note, date: values.date, receipt: entry ? entry.receipt || "" : "" };
+        // so a cold-starting server never blocks the sheet.
+        const payload = { amount: values.amount, category: cat.id, note: values.note, date: values.date, receipt: values.receipt };
         const editingId = entry ? entry.id : null;
         const tempId = "tmp" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
         const before = editingId ? incomes.find((x) => x.id === editingId) : null;
@@ -1480,14 +1481,14 @@
     const arSection = nw.apar.ar
       ? `<div class="fin-section">
           <div class="fin-section-heading"><span>Accounts Receivable (current asset)</span><span class="subtotal">${currency(nw.apar.ar)}</span></div>
-          <div class="fin-note">Open invoices owed to you — manage them on the Cash tab.</div>
+          <div class="fin-note">Open invoices owed to you — manage them on the Revenue tab.</div>
           ${aparRows("ar", "Invoice")}
         </div>`
       : "";
     const apSection = nw.apar.ap
       ? `<div class="fin-section">
           <div class="fin-section-heading"><span>Accounts Payable (current liability)</span><span class="subtotal">${currency(nw.apar.ap)}</span></div>
-          <div class="fin-note">Open bills you owe — manage them on the Cash tab.</div>
+          <div class="fin-note">Open bills you owe — manage them on the Expense tab.</div>
           ${aparRows("ap", "Bill")}
         </div>`
       : "";
@@ -1674,7 +1675,7 @@
 
       <div class="fin-card">
         <div class="fin-card-title">Expenses</div>
-        <div class="fin-note">Filled automatically from your expense log — add expenses in the Spend tab.</div>
+        <div class="fin-note">Filled automatically from your expense log — add expenses in the Expense tab.</div>
         ${expenseRows || '<div class="fin-note">No expenses for this period.</div>'}
         <div class="fin-totals"><span>Total Expenses</span><span class="value neg">${currency(totalExpense)}</span></div>
       </div>
@@ -2234,6 +2235,9 @@
     // The combined state needs its own due date: the main date field anchors
     // depreciation (invoice/purchase date) and can't double as the due date.
     dueDateField.style.display = both ? "" : "none";
+    // Invoice numbers ride on plain expense entries only — assets and
+    // payables live in their own tables, which don't store one.
+    receiptField.style.display = assetMode || payableMode ? "none" : "";
     dateLabel.textContent = assetMode ? "Invoice date" : payableMode ? "Due date" : "Invoice date";
     noteInput.placeholder = assetMode ? "e.g. MacBook Pro" : payableMode ? "e.g. Supplier bill" : "e.g. Coffee with Sam";
     if (assetMode) renderDepCategoryGrid();
@@ -2256,6 +2260,7 @@
     selectedCategory = expense ? expense.category : null;
     amountInput.value = expense ? expense.amount : "";
     noteInput.value = expense ? expense.note || "" : "";
+    receiptInput.value = expense ? expense.receipt || "" : "";
     dateInput.value = expense ? expense.date : todayStr();
     dueDateInput.value = todayStr();
     sheetTitle.textContent = expense ? "Edit expense" : "Add expense";
@@ -2382,14 +2387,11 @@
     }
 
     // Optimistic: the expense shows instantly and syncs in the background,
-    // so a cold-starting server never blocks the sheet. The receipt input was
-    // removed from the sheet; preserve an edited expense's existing receipt
-    // value instead of wiping it, new entries just have none.
+    // so a cold-starting server never blocks the sheet.
     const editingId = editingExpenseId;
-    const prevExpense = editingId ? expenses.find((x) => x.id === editingId) : null;
-    const payload = { amount, category: selectedCategory, note, date, receipt: prevExpense ? prevExpense.receipt || "" : "" };
+    const payload = { amount, category: selectedCategory, note, date, receipt: receiptInput.value.trim() };
     const tempId = "tmp" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-    const before = prevExpense;
+    const before = editingId ? expenses.find((x) => x.id === editingId) : null;
     if (editingId) {
       expenses = expenses.map((x) => (x.id === editingId ? { ...x, ...payload } : x));
     } else {

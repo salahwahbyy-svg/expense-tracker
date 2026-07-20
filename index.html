@@ -66,8 +66,8 @@ try {
 </div>
 
 <nav class="tabbar">
-  <button class="tab active" data-tab="expenses"><span class="tab-icon">🧾</span><span>Spend</span></button>
-  <button class="tab" data-tab="income"><span class="tab-icon">💰</span><span>Income</span></button>
+  <button class="tab active" data-tab="expenses"><span class="tab-icon">🧾</span><span>Expense</span></button>
+  <button class="tab" data-tab="income"><span class="tab-icon">💰</span><span>Revenue</span></button>
   <button class="tab" data-tab="overview"><span class="tab-icon">📊</span><span>Overview</span></button>
   <button class="tab" data-tab="balance"><span class="tab-icon">⚖️</span><span>Balance</span></button>
   <button class="tab" data-tab="pnl"><span class="tab-icon">📈</span><span>P&amp;L</span></button>
@@ -112,6 +112,11 @@ try {
       <input id="noteInput" type="text" placeholder="e.g. Coffee with Sam" maxlength="60" />
     </div>
 
+    <div class="field" id="receiptField">
+      <label>Invoice number (optional)</label>
+      <input id="receiptInput" type="text" placeholder="e.g. INV-4582" maxlength="40" />
+    </div>
+
     <div class="field">
       <label id="dateLabel">Invoice date</label>
       <input id="dateInput" type="date" />
@@ -148,7 +153,7 @@ try {
   <div class="sheet">
     <div class="sheet-handle"></div>
     <h2 class="sheet-title">Edit categories</h2>
-    <p class="sync-hint">Tap the dot to change color. Set a monthly budget to see progress bars on the Spend tab. Deleting a category moves its expenses to Other.</p>
+    <p class="sync-hint">Tap the dot to change color. Set a monthly budget to see progress bars on the Expense tab. Deleting a category keeps its old expenses, shown as "name · deleted".</p>
     <div id="catList"></div>
     <button id="addCatBtn" class="fin-add-btn" type="button">+ Add category</button>
     <div class="sheet-actions">
