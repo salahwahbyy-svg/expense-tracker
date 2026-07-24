@@ -346,9 +346,24 @@
   // shows alongside real spending so the total reflects asset wear too.
   const DEPRECIATION_CAT = { id: "depreciation", label: "Depreciation", emoji: "🏭", color: "#8f9bb3", budget: 0 };
 
+  // Tap a category bar to filter the list to that category; tap it again
+  // (or "show all") to clear. One filter per page, not persisted.
+  let expenseFilterCat = null;
+
   function renderTotal(list, dep) {
     const total = list.reduce((sum, e) => sum + e.amount, 0) + (dep || 0);
     monthTotalEl.textContent = currency(total);
+    const sub = document.querySelector("#view-expenses .total-sub");
+    if (expenseFilterCat) {
+      const cat = expenseFilterCat === DEPRECIATION_CAT.id && !cats.some((c) => c.id === expenseFilterCat) ? DEPRECIATION_CAT : catById(expenseFilterCat);
+      sub.innerHTML = `${escapeHtml(cat.emoji)} ${escapeHtml(catDisplayLabel(cat))} this month — <button id="expFilterClear" class="filter-clear" type="button">show all</button>`;
+      document.getElementById("expFilterClear").addEventListener("click", () => {
+        expenseFilterCat = null;
+        renderExpensesTab();
+      });
+    } else {
+      sub.textContent = "spent this month";
+    }
   }
 
   function renderChart(list, dep) {
@@ -395,12 +410,17 @@
       const fill = over ? "var(--danger)" : cat.color;
       const row = document.createElement("div");
       row.className = "bar-row";
+      if (expenseFilterCat && expenseFilterCat !== cat.id) row.classList.add("dim");
       row.innerHTML = `
         <span class="bar-dot" style="background:${cat.color}"></span>
         <span class="bar-label">${escapeHtml(catDisplayLabel(cat))}</span>
         <span class="bar-track"><span class="bar-fill" style="width:${pct}%;background:${fill}"></span></span>
         <span class="bar-amount ${over ? "neg" : ""}">${amountHtml}</span>
       `;
+      row.addEventListener("click", () => {
+        expenseFilterCat = expenseFilterCat === cat.id ? null : cat.id;
+        renderExpensesTab();
+      });
       barsEl.appendChild(row);
     });
   }
@@ -421,7 +441,11 @@
   function renderList(list) {
     listEl.innerHTML = "";
 
-    const openPayables = fin.apar.filter((x) => x.kind === "ap" && !x.paid_date);
+    // While a category filter is active, only payables stored under that
+    // category stay visible (uncategorized ones drop out with the rest).
+    const openPayables = fin.apar.filter(
+      (x) => x.kind === "ap" && !x.paid_date && (!expenseFilterCat || x.category === expenseFilterCat)
+    );
 
     if (list.length === 0 && openPayables.length === 0) {
       emptyState.style.display = "flex";
@@ -552,10 +576,15 @@
   }
 
   function renderExpensesTab() {
-    const list = expensesForMonth(viewDate);
+    const all = expensesForMonth(viewDate);
     const dep = depForMonth(monthStr(viewDate));
-    renderTotal(list, dep);
-    renderChart(list, dep);
+    const f = expenseFilterCat;
+    const list = f ? all.filter((e) => e.category === f) : all;
+    // Depreciation is a virtual category: it has no list rows, so it only
+    // counts toward the total when unfiltered or when it IS the filter.
+    const depShown = !f || f === DEPRECIATION_CAT.id ? dep : 0;
+    renderTotal(list, depShown);
+    renderChart(all, dep);
     renderList(list);
   }
 
@@ -568,21 +597,29 @@
     });
   }
 
+  // Same tap-a-bar filter as the Expense page, tracked separately.
+  let incomeFilterCat = null;
+
   function renderIncome() {
-    const list = incomesForMonth(viewDate);
+    const all = incomesForMonth(viewDate);
+    const list = incomeFilterCat ? all.filter((e) => e.category === incomeFilterCat) : all;
     const total = list.reduce((s, e) => s + (Number(e.amount) || 0), 0);
 
+    // Bars always show the full month so other categories stay tappable
+    // while a filter is active; the rest of the page shows the filtered set.
+    const allTotal = all.reduce((s, e) => s + (Number(e.amount) || 0), 0);
     const totalsByCat = {};
-    list.forEach((e) => {
+    all.forEach((e) => {
       totalsByCat[e.category] = (totalsByCat[e.category] || 0) + (Number(e.amount) || 0);
     });
     const bars = Object.entries(totalsByCat)
       .sort((a, b) => b[1] - a[1])
       .map(([id, v]) => {
         const cat = incomeCatById(id);
-        const pct = total > 0 ? (v / total) * 100 : 0;
+        const pct = allTotal > 0 ? (v / allTotal) * 100 : 0;
+        const dim = incomeFilterCat && incomeFilterCat !== id ? " dim" : "";
         return `
-          <div class="bar-row">
+          <div class="bar-row${dim}" data-cat="${escAttr(id)}">
             <span class="bar-dot" style="background:${escAttr(cat.color)}"></span>
             <span class="bar-label">${escapeHtml(cat.label)}</span>
             <span class="bar-track"><span class="bar-fill" style="width:${pct}%;background:${escAttr(cat.color)}"></span></span>
@@ -590,6 +627,11 @@
           </div>`;
       })
       .join("");
+
+    const filterCat = incomeFilterCat ? incomeCatById(incomeFilterCat) : null;
+    const totalSub = filterCat
+      ? `${escapeHtml(filterCat.emoji)} ${escapeHtml(filterCat.label)} this month — <button id="incFilterClear" class="filter-clear" type="button">show all</button>`
+      : "earned this month";
 
     const sorted = [...list].sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : b.createdAt - a.createdAt));
     const groups = new Map();
@@ -626,7 +668,9 @@
 
     // Open receivables (money expected, not yet collected) get their own
     // section above the day groups, mirroring the payables section on Spend.
-    const openReceivables = fin.apar.filter((x) => x.kind === "ar" && !x.paid_date);
+    const openReceivables = fin.apar.filter(
+      (x) => x.kind === "ar" && !x.paid_date && (!incomeFilterCat || x.category === incomeFilterCat)
+    );
     const arTotal = openReceivables.reduce((s, x) => s + (Number(x.amount) || 0), 0);
     const arRows = openReceivables
       .map((x) => {
@@ -659,7 +703,7 @@
     return `
       <section class="totals">
         <div class="total-amount pos">${currency(total)}</div>
-        <div class="total-sub">earned this month</div>
+        <div class="total-sub">${totalSub}</div>
       </section>
       ${bars ? `<section class="chart-card"><div class="chart-title"><span>By category</span><button id="editIncCatsBtn" class="chart-edit-btn" type="button">✏️ Edit</button></div><div class="bars">${bars}</div></section>` : ""}
       <section class="list-section">
@@ -690,6 +734,18 @@
     });
     const editBtn = document.getElementById("editIncCatsBtn");
     if (editBtn) editBtn.addEventListener("click", openIncCatSheet);
+    finView.querySelectorAll(".bars .bar-row[data-cat]").forEach((row) => {
+      row.addEventListener("click", () => {
+        incomeFilterCat = incomeFilterCat === row.dataset.cat ? null : row.dataset.cat;
+        renderFin();
+      });
+    });
+    const clearBtn = document.getElementById("incFilterClear");
+    if (clearBtn)
+      clearBtn.addEventListener("click", () => {
+        incomeFilterCat = null;
+        renderFin();
+      });
   }
 
   function openIncomeSheet(entry) {
